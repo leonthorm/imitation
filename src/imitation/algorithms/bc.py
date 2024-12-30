@@ -508,3 +508,20 @@ class BC(algo_base.DemonstrationAlgorithm):
             # if there remains an incomplete batch
             batch_num += 1
             process_batch()
+
+    def get_dataset(
+            self,
+    ):
+        """estimate switch-back parameter and initial switch-to parameter from data
+
+        Returns:
+            dataset.
+        """
+        return self._demo_data_loader.data_loader.dataset
+
+    def get_policy_var(self):
+        log_std = self.policy.log_std
+        variance = th.exp(2 * log_std)
+
+        return variance.mean()
+

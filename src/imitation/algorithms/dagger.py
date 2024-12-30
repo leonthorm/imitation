@@ -93,14 +93,14 @@ class ExponentialBetaSchedule(BetaSchedule):
             beta as `self.decay_probability ^ round_num`
         """
         assert round_num >= 0
-        return self.decay_probability**round_num
+        return self.decay_probability ** round_num
 
 
 def reconstruct_trainer(
-    scratch_dir: types.AnyPath,
-    venv: vec_env.VecEnv,
-    custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
-    device: Union[th.device, str] = "auto",
+        scratch_dir: types.AnyPath,
+        venv: vec_env.VecEnv,
+        custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        device: Union[th.device, str] = "auto",
 ) -> "DAggerTrainer":
     """Reconstruct trainer from the latest snapshot in some working directory.
 
@@ -128,11 +128,11 @@ def reconstruct_trainer(
 
 
 def _save_dagger_demo(
-    trajectory: types.Trajectory,
-    trajectory_index: int,
-    save_dir: types.AnyPath,
-    rng: np.random.Generator,
-    prefix: str = "",
+        trajectory: types.Trajectory,
+        trajectory_index: int,
+        save_dir: types.AnyPath,
+        rng: np.random.Generator,
+        prefix: str = "",
 ) -> None:
     save_dir = util.parse_path(save_dir)
     assert isinstance(trajectory, types.Trajectory)
@@ -165,12 +165,12 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
     _last_user_actions: Optional[np.ndarray]
 
     def __init__(
-        self,
-        venv: vec_env.VecEnv,
-        get_robot_acts: Callable[[np.ndarray], np.ndarray],
-        beta: float,
-        save_dir: types.AnyPath,
-        rng: np.random.Generator,
+            self,
+            venv: vec_env.VecEnv,
+            get_robot_acts: Callable[[np.ndarray], np.ndarray],
+            beta: float,
+            save_dir: types.AnyPath,
+            rng: np.random.Generator,
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -286,6 +286,266 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
 
         return next_obs, rews, dones, infos
 
+    def estimate_switch_parameters(
+            self,
+            data,
+            target_rate=0.01
+    ) -> None:
+        """estimate switch-back parameter and initial switch-to parameter from data
+
+        Returns:
+            None.
+        """
+        discrepancies, estimates = [], []
+        for i in range(0, 0.9 * data.acts.size):
+            a_pred = self.get_robot_acts(data.obs[i])
+            a_sup = data.acts[i]
+            discrepancies.append(np.sum((a_pred - a_sup) ** 2))
+            # TODO append variance for ensemble (policy.variance(obs))
+            estimates.append(0)
+        heldout_discrepancies, heldout_estimates = [], []
+        for i in range(0.9 * data.acts.size, data.acts.size):
+            a_pred = self.get_robot_acts(data.obs[i])
+            a_sup = data.acts[i]
+            heldout_discrepancies.append(np.sum((a_pred - a_sup) ** 2))
+            # TODO append variance for ensemble (policy.variance(obs))
+            heldout_estimates.append(0)
+        self.switch2robot_thresh = np.array(discrepancies).mean()
+        target_idx = int((1 - target_rate) * len(heldout_estimates))
+        self.switch2human_thresh = sorted(heldout_estimates)[target_idx]
+        print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
+        print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
+        self.switch2human_thresh2 = 0.48  # a priori guess: 48% discounted probability of success. Could also estimate from data
+        self.switch2robot_thresh2 = 0.495
+
+
+class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
+    """DAgger VecEnvWrapper for querying and saving expert actions.
+
+    Every call to `.step(actions)` accepts and saves expert actions to `self.save_dir`,
+    but only forwards expert actions to the wrapped VecEnv with probability
+    `self.beta`. With probability `1 - self.beta`, a "robot" action (i.e
+    an action from the imitation policy) is forwarded instead.
+
+    Demonstrations are saved as `TrajectoryWithRew` to `self.save_dir` at the end
+    of every episode.
+    """
+
+    traj_accum: Optional[rollout.TrajectoryAccumulator]
+    _last_obs: Optional[np.ndarray]
+    _last_user_actions: Optional[np.ndarray]
+
+    def __init__(
+            self,
+            venv: vec_env.VecEnv,
+            get_robot_acts: Callable[[np.ndarray], np.ndarray],
+            save_dir: types.AnyPath,
+            rng: np.random.Generator,
+            variance: Callable[[], float]
+    ) -> None:
+        """Builds InteractiveTrajectoryCollector.
+
+        Args:
+            venv: vectorized environment to sample trajectories from.
+            get_robot_acts: get robot actions that can be substituted for
+                human actions. Takes a vector of observations as input & returns a
+                vector of actions.
+            beta: fraction of the time to use action given to .step() instead of
+                robot action. The choice of robot or human action is independently
+                randomized for each individual `Env` at every timestep.
+            save_dir: directory to save collected trajectories in.
+            rng: random state for random number generation.
+        """
+        super().__init__(venv)
+        self.get_robot_acts = get_robot_acts
+        self.variance = variance
+        self.traj_accum = None
+        self.save_dir = save_dir
+        self._last_obs = None
+        self._done_before = True
+        self._is_reset = False
+        self._last_user_actions = None
+        self.rng = rng
+        self.is_initial_collection = True
+        self.switch2human_thresh = []
+        self.switch2human_thresh2 = []
+        self.switch2robot_thresh = []
+        self.switch2robot_thresh2 = []
+        self.expert_mode = [False] * self.venv.num_envs
+        self.estimates = [[]] * self.venv.num_envs
+        self.estimates2 = [[]] * self.venv.num_envs
+        self.target_rate = 0.01
+        self.q_learning = False
+        self.num_switch_to_robot = 0
+        self.num_switch_to_human = 0
+        self.num_switch_to_human2 = 0
+        self.online_burden = 0
+
+        # for _ in self.venv.envs:
+
+    def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
+        """Set the seed for the DAgger random number generator and wrapped VecEnv.
+
+        The DAgger RNG is used along with `self.beta` to determine whether the expert
+        or robot action is forwarded to the wrapped VecEnv.
+
+        Args:
+            seed: The random seed. May be None for completely random seeding.
+
+        Returns:
+            A list containing the seeds for each individual env. Note that all list
+            elements may be None, if the env does not return anything when seeded.
+        """
+        self.rng = np.random.default_rng(seed=seed)
+        return list(self.venv.seed(seed))
+
+    def reset(self) -> np.ndarray:
+        """Resets the environment.
+
+        Returns:
+            obs: first observation of a new trajectory.
+        """
+        self.traj_accum = rollout.TrajectoryAccumulator()
+        obs = self.venv.reset()
+        assert isinstance(obs, np.ndarray)
+        for i, ob in enumerate(obs):
+            self.traj_accum.add_step({"obs": ob}, key=i)
+        self._last_obs = obs
+        self._is_reset = True
+        self._last_user_actions = None
+        return obs
+
+    def step_async(self, actions: np.ndarray) -> None:
+        """Steps with a `1 - beta` chance of using `self.get_robot_acts` instead.
+
+        DAgger needs to be able to inject imitation policy actions randomly at some
+        subset of time steps. This method has a `self.beta` chance of keeping the
+        `actions` passed in as an argument, and a `1 - self.beta` chance of
+        forwarding actions generated by `self.get_robot_acts` instead.
+        "robot" (i.e. imitation policy) action if necessary.
+
+        At the end of every episode, a `TrajectoryWithRew` is saved to `self.save_dir`,
+        where every saved action is the expert action, regardless of whether the
+        robot action was used during that timestep.
+
+        Args:
+            actions: the _intended_ demonstrator/expert actions for the current
+                state. This will be executed with probability `self.beta`.
+                Otherwise, a "robot" (typically a BC policy) action will be sampled
+                and executed instead via `self.get_robot_act`.
+        """
+        assert self._is_reset, "call .reset() before .step()"
+        assert self._last_obs is not None
+
+        # Replace each given action with a robot action 100*(1-beta)% of the time.
+        actual_acts = np.array(actions)
+
+        if not self.is_initial_collection:
+            for i, act in enumerate(actual_acts):
+                robot_act = self.get_robot_acts(self._last_obs[i])
+                safety = 0
+                # safety = ac.safety(o,a)
+                if not self.expert_mode[i]:
+                    self.estimates[i].append(self.variance())
+                    # self.estimates2[i].append(policy.safety())
+                    actual_acts[i] = robot_act
+                if self.expert_mode[i]:
+                    self.online_burden += 1
+
+                    # self.risk[i].append(safety)
+                    # safety = policy.safety
+                    if  np.sum((robot_act - act) ** 2) < self.switch2robot_thresh and (not self.q_learning or safety > self.switch2robot_thresh2):
+                        print("Switch to Robot")
+                        self.expert_mode[i] = False
+                        self.num_switch_to_robot += 1
+                elif self.variance > self.switch2human_thresh[i]:
+                    print("Switch to Human (Novel)")
+                    self.num_switch_to_human += 1
+                    self.expert_mode[i] = True
+                    continue
+                elif self.q_learning and safety < self.switch2human_thresh2[i]:
+                    print("Switch to Human (Risk)")
+                    self.num_switch_to_human2 += 1
+                    self.expert_mode[i] = True
+                    continue
+                else:
+                    # self.risk[i].append(safety)
+                    print("")
+
+        self._last_user_actions = actions
+        self.venv.step_async(actual_acts)
+
+    def step_wait(self) -> VecEnvStepReturn:
+        """Returns observation, reward, etc after previous `step_async()` call.
+
+        Stores the transition, and saves trajectory as demo once complete.
+
+        Returns:
+            Observation, reward, dones (is terminal?) and info dict.
+        """
+        next_obs, rews, dones, infos = self.venv.step_wait()
+        assert isinstance(next_obs, np.ndarray)
+        assert self.traj_accum is not None
+        assert self._last_user_actions is not None
+        self._last_obs = next_obs
+        fresh_demos = self.traj_accum.add_steps_and_auto_finish(
+            obs=next_obs,
+            acts=self._last_user_actions,
+            rews=rews,
+            infos=infos,
+            dones=dones,
+        )
+        for traj_index, traj in enumerate(fresh_demos):
+            _save_dagger_demo(traj, traj_index, self.save_dir, self.rng)
+
+        return next_obs, rews, dones, infos
+
+    def recompute_thresholds(self) -> None:
+        for i in range(self.venv.num_envs):
+            if len(self.estimates[i]) > 25:
+                target_idx = int((1 - self.target_rate) * len(self.estimates[i]))
+                self.switch2human_thresh[i] = sorted(self.estimates[i])[target_idx]
+                self.switch2human_thresh2[i] = sorted(self.estimates2[i], reverse=True)[target_idx]
+                self.switch2robot_thresh2[i] = sorted(self.estimates2[i])[int(0.5 * len(self.estimates[i]))]
+                print("len(estimates): {}, New switch thresholds: {} {} {}".format(len(self.estimates[i]), self.switch2human_thresh[i],
+                                                                                   self.switch2human_thresh2[i],
+                                                                                   self.switch2robot_thresh2)[i])
+        self.estimates = [[]] * self.venv.num_envs
+        self.estimates2 = [[]] * self.venv.num_envs
+
+
+    def estimate_switch_parameters(
+            self,
+            data,
+            target_rate=0.01
+    ) -> None:
+        """estimate switch-back parameter and initial switch-to parameter from data
+
+        Returns:
+            None.
+        """
+        discrepancies, estimates = [], []
+        for i in range(0, 0.9 * data.acts.size):
+            a_pred = self.get_robot_acts(data.obs[i])
+            a_sup = data.acts[i]
+            discrepancies.append(np.sum((a_pred - a_sup) ** 2))
+            # TODO append variance for ensemble (policy.variance(obs))
+            estimates.append(0)
+        heldout_discrepancies, heldout_estimates = [], []
+        for i in range(0.9 * data.acts.size, data.acts.size):
+            a_pred = self.get_robot_acts(data.obs[i])
+            a_sup = data.acts[i]
+            heldout_discrepancies.append(np.sum((a_pred - a_sup) ** 2))
+            # TODO append variance for ensemble (policy.variance(obs))
+            heldout_estimates.append(0)
+        self.switch2robot_thresh = np.array(discrepancies).mean()
+        target_idx = int((1 - target_rate) * len(heldout_estimates))
+        self.switch2human_thresh = sorted(heldout_estimates)[target_idx]
+        print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
+        print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
+        self.switch2human_thresh2 = 0.48  # a priori guess: 48% discounted probability of success. Could also estimate from data
+        self.switch2robot_thresh2 = 0.495
+
 
 class NeedsDemosException(Exception):
     """Signals demos need to be collected for current round before continuing."""
@@ -327,14 +587,14 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
     """The default number of BC training epochs in `extend_and_update`."""
 
     def __init__(
-        self,
-        *,
-        venv: vec_env.VecEnv,
-        scratch_dir: types.AnyPath,
-        rng: np.random.Generator,
-        beta_schedule: Optional[Callable[[int], float]] = None,
-        bc_trainer: bc.BC,
-        custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+            self,
+            *,
+            venv: vec_env.VecEnv,
+            scratch_dir: types.AnyPath,
+            rng: np.random.Generator,
+            beta_schedule: Optional[Callable[[int], float]] = None,
+            bc_trainer: bc.BC,
+            custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
     ):
         """Builds DAggerTrainer.
 
@@ -453,8 +713,8 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             self._last_loaded_round = self.round_num
 
     def extend_and_update(
-        self,
-        bc_train_kwargs: Optional[Mapping[str, Any]] = None,
+            self,
+            bc_train_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> int:
         """Extend internal batch of data and train BC.
 
@@ -515,6 +775,25 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         )
         return collector
 
+    def create_thrifty_trajectory_collector(self) -> ThriftyTrajectoryCollector:
+        """Create trajectory collector to extend current round's demonstration set.
+
+        Returns:
+            A collector configured with the appropriate beta, imitator policy, etc.
+            for the current round. Refer to the documentation for
+            `InteractiveTrajectoryCollector` to see how to use this.
+        """
+        save_dir = self._demo_dir_path_for_round()
+
+        collector = ThriftyTrajectoryCollector(
+            venv=self.venv,
+            get_robot_acts=lambda acts: self.bc_trainer.policy.predict(acts)[0],
+            save_dir=save_dir,
+            rng=self.rng,
+            variance=self.bc_trainer.get_policy_var()
+        )
+        return collector
+
     def save_trainer(self) -> Tuple[pathlib.Path, pathlib.Path]:
         """Create a snapshot of trainer in the scratch/working directory.
 
@@ -553,14 +832,14 @@ class SimpleDAggerTrainer(DAggerTrainer):
     """Simpler subclass of DAggerTrainer for training with synthetic feedback."""
 
     def __init__(
-        self,
-        *,
-        venv: vec_env.VecEnv,
-        scratch_dir: types.AnyPath,
-        expert_policy: policies.BasePolicy,
-        rng: np.random.Generator,
-        expert_trajs: Optional[Sequence[types.Trajectory]] = None,
-        **dagger_trainer_kwargs,
+            self,
+            *,
+            venv: vec_env.VecEnv,
+            scratch_dir: types.AnyPath,
+            expert_policy: policies.BasePolicy,
+            rng: np.random.Generator,
+            expert_trajs: Optional[Sequence[types.Trajectory]] = None,
+            **dagger_trainer_kwargs,
     ):
         """Builds SimpleDAggerTrainer.
 
@@ -613,12 +892,12 @@ class SimpleDAggerTrainer(DAggerTrainer):
                 )
 
     def train(
-        self,
-        total_timesteps: int,
-        *,
-        rollout_round_min_episodes: int = 3,
-        rollout_round_min_timesteps: int = 500,
-        bc_train_kwargs: Optional[dict] = None,
+            self,
+            total_timesteps: int,
+            *,
+            rollout_round_min_episodes: int = 3,
+            rollout_round_min_timesteps: int = 500,
+            bc_train_kwargs: Optional[dict] = None,
     ) -> None:
         """Train the DAgger agent.
 
