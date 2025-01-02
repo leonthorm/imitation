@@ -286,38 +286,6 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
 
         return next_obs, rews, dones, infos
 
-    def estimate_switch_parameters(
-            self,
-            data,
-            target_rate=0.01
-    ) -> None:
-        """estimate switch-back parameter and initial switch-to parameter from data
-
-        Returns:
-            None.
-        """
-        discrepancies, estimates = [], []
-        for i in range(0, 0.9 * data.acts.size):
-            a_pred = self.get_robot_acts(data.obs[i])
-            a_sup = data.acts[i]
-            discrepancies.append(np.sum((a_pred - a_sup) ** 2))
-            # TODO append variance for ensemble (policy.variance(obs))
-            estimates.append(0)
-        heldout_discrepancies, heldout_estimates = [], []
-        for i in range(0.9 * data.acts.size, data.acts.size):
-            a_pred = self.get_robot_acts(data.obs[i])
-            a_sup = data.acts[i]
-            heldout_discrepancies.append(np.sum((a_pred - a_sup) ** 2))
-            # TODO append variance for ensemble (policy.variance(obs))
-            heldout_estimates.append(0)
-        self.switch2robot_thresh = np.array(discrepancies).mean()
-        target_idx = int((1 - target_rate) * len(heldout_estimates))
-        self.switch2human_thresh = sorted(heldout_estimates)[target_idx]
-        print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
-        print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
-        self.switch2human_thresh2 = 0.48  # a priori guess: 48% discounted probability of success. Could also estimate from data
-        self.switch2robot_thresh2 = 0.495
-
 
 class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
     """DAgger VecEnvWrapper for querying and saving expert actions.
@@ -341,7 +309,12 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
             get_robot_acts: Callable[[np.ndarray], np.ndarray],
             save_dir: types.AnyPath,
             rng: np.random.Generator,
-            variance: Callable[[], float]
+            variance: Callable[[], float],
+            switch2human_thresh: [np.ndarray],
+            switch2human_thresh2: [np.ndarray],
+            switch2robot_thresh: [np.ndarray],
+            switch2robot_thresh2: [np.ndarray],
+            is_initial_collection: bool = False,
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -366,11 +339,11 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
         self._is_reset = False
         self._last_user_actions = None
         self.rng = rng
-        self.is_initial_collection = True
-        self.switch2human_thresh = []
-        self.switch2human_thresh2 = []
-        self.switch2robot_thresh = []
-        self.switch2robot_thresh2 = []
+        self.is_initial_collection = is_initial_collection
+        self.switch2human_thresh = switch2human_thresh
+        self.switch2human_thresh2 = switch2human_thresh2
+        self.switch2robot_thresh = switch2robot_thresh
+        self.switch2robot_thresh2 = switch2robot_thresh2
         self.expert_mode = [False] * self.venv.num_envs
         self.estimates = [[]] * self.venv.num_envs
         self.estimates2 = [[]] * self.venv.num_envs
@@ -439,26 +412,34 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
 
         # Replace each given action with a robot action 100*(1-beta)% of the time.
         actual_acts = np.array(actions)
+        # TODO: get variance per env predict
+        # TODO: q learning if ensemble
 
         if not self.is_initial_collection:
             for i, act in enumerate(actual_acts):
+                print('expert mode:', self.expert_mode[i])
                 robot_act = self.get_robot_acts(self._last_obs[i])
                 safety = 0
                 # safety = ac.safety(o,a)
+                variance = self.variance()
                 if not self.expert_mode[i]:
                     self.estimates[i].append(self.variance())
+                    # TODO : add safety
                     # self.estimates2[i].append(policy.safety())
+                    self.estimates2[i].append(0)
                     actual_acts[i] = robot_act
                 if self.expert_mode[i]:
                     self.online_burden += 1
 
                     # self.risk[i].append(safety)
                     # safety = policy.safety
-                    if  np.sum((robot_act - act) ** 2) < self.switch2robot_thresh and (not self.q_learning or safety > self.switch2robot_thresh2):
+                    if np.sum((robot_act - act) ** 2) < self.switch2robot_thresh[i] and (
+                            not self.q_learning or safety > self.switch2robot_thresh2[i]):
                         print("Switch to Robot")
                         self.expert_mode[i] = False
                         self.num_switch_to_robot += 1
-                elif self.variance > self.switch2human_thresh[i]:
+                # TODO: change to > whith proper variance
+                elif self.variance() >= self.switch2human_thresh[i]:
                     print("Switch to Human (Novel)")
                     self.num_switch_to_human += 1
                     self.expert_mode[i] = True
@@ -500,51 +481,58 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
 
         return next_obs, rews, dones, infos
 
-    def recompute_thresholds(self) -> None:
+    def recompute_thresholds(self):
+        switch2human_thresh = []
+        switch2human_thresh2 = []
+        switch2robot_thresh2 = []
         for i in range(self.venv.num_envs):
             if len(self.estimates[i]) > 25:
                 target_idx = int((1 - self.target_rate) * len(self.estimates[i]))
-                self.switch2human_thresh[i] = sorted(self.estimates[i])[target_idx]
-                self.switch2human_thresh2[i] = sorted(self.estimates2[i], reverse=True)[target_idx]
-                self.switch2robot_thresh2[i] = sorted(self.estimates2[i])[int(0.5 * len(self.estimates[i]))]
-                print("len(estimates): {}, New switch thresholds: {} {} {}".format(len(self.estimates[i]), self.switch2human_thresh[i],
-                                                                                   self.switch2human_thresh2[i],
-                                                                                   self.switch2robot_thresh2)[i])
-        self.estimates = [[]] * self.venv.num_envs
-        self.estimates2 = [[]] * self.venv.num_envs
+                switch2human_thresh.append(sorted(self.estimates[i])[target_idx])
+                switch2human_thresh2.append(sorted(self.estimates2[i], reverse=True)[target_idx])
+                switch2robot_thresh2.append( sorted(self.estimates2[i])[int(0.5 * len(self.estimates[i]))])
+                print("len(estimates): {}, New switch thresholds: {} {} {}".format(len(self.estimates[i]),
+                                                                                   switch2human_thresh[i],
+                                                                                   switch2human_thresh2[i],
+                                                                                   switch2robot_thresh2)[i])
 
+        return switch2human_thresh, switch2human_thresh2, switch2robot_thresh2
 
     def estimate_switch_parameters(
             self,
             data,
             target_rate=0.01
-    ) -> None:
+    ):
         """estimate switch-back parameter and initial switch-to parameter from data
 
         Returns:
             None.
         """
         discrepancies, estimates = [], []
-        for i in range(0, 0.9 * data.acts.size):
+        heldout_thresh = int(0.9 * data.acts.shape[0])
+        for i in range(0, heldout_thresh):
             a_pred = self.get_robot_acts(data.obs[i])
             a_sup = data.acts[i]
             discrepancies.append(np.sum((a_pred - a_sup) ** 2))
             # TODO append variance for ensemble (policy.variance(obs))
-            estimates.append(0)
+            estimates.append(self.variance())
         heldout_discrepancies, heldout_estimates = [], []
-        for i in range(0.9 * data.acts.size, data.acts.size):
+        for i in range(heldout_thresh, data.acts.shape[0]):
             a_pred = self.get_robot_acts(data.obs[i])
             a_sup = data.acts[i]
             heldout_discrepancies.append(np.sum((a_pred - a_sup) ** 2))
             # TODO append variance for ensemble (policy.variance(obs))
-            heldout_estimates.append(0)
-        self.switch2robot_thresh = np.array(discrepancies).mean()
+            heldout_estimates.append(self.variance())
+        switch2robot_thresh = [np.array(discrepancies).mean()] * self.venv.num_envs
         target_idx = int((1 - target_rate) * len(heldout_estimates))
-        self.switch2human_thresh = sorted(heldout_estimates)[target_idx]
+        switch2human_thresh = [sorted(heldout_estimates)[target_idx]] * self.venv.num_envs
         print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
         print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
-        self.switch2human_thresh2 = 0.48  # a priori guess: 48% discounted probability of success. Could also estimate from data
-        self.switch2robot_thresh2 = 0.495
+        switch2human_thresh2 = [
+            0.48] * self.venv.num_envs  # a priori guess: 48% discounted probability of success. Could also estimate from data
+        switch2robot_thresh2 = [0.495] * self.venv.num_envs
+
+        return switch2robot_thresh, switch2human_thresh, switch2human_thresh2, switch2robot_thresh2
 
 
 class NeedsDemosException(Exception):
@@ -775,7 +763,13 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         )
         return collector
 
-    def create_thrifty_trajectory_collector(self) -> ThriftyTrajectoryCollector:
+    def create_thrifty_trajectory_collector(
+            self, switch2robot_thresh,
+            switch2human_thresh,
+            switch2human_thresh2,
+            switch2robot_thresh2,
+            is_initial_collection=False
+    ) -> ThriftyTrajectoryCollector:
         """Create trajectory collector to extend current round's demonstration set.
 
         Returns:
@@ -790,7 +784,10 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             get_robot_acts=lambda acts: self.bc_trainer.policy.predict(acts)[0],
             save_dir=save_dir,
             rng=self.rng,
-            variance=self.bc_trainer.get_policy_var()
+            variance=lambda: self.bc_trainer.get_policy_var(),
+            switch2robot_thresh=switch2robot_thresh, switch2human_thresh=switch2human_thresh,
+            switch2human_thresh2=switch2human_thresh2, switch2robot_thresh2=switch2robot_thresh2,
+            is_initial_collection=is_initial_collection
         )
         return collector
 

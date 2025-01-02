@@ -522,6 +522,6 @@ class BC(algo_base.DemonstrationAlgorithm):
     def get_policy_var(self):
         log_std = self.policy.log_std
         variance = th.exp(2 * log_std)
-
-        return variance.mean()
+        mean = variance.mean()
+        return variance.mean().item()
 
