@@ -557,7 +557,9 @@ def generate_trajectories_2_robots(
         real_rew = trajectory.rews.shape
         assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
 
-    return trajectories_r1.append(trajectories_r2)
+    trajectories = trajectories_r1
+    trajectories.extend(trajectories_r2)
+    return trajectories
 
 
 def rollout_stats(

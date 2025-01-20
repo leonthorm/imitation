@@ -281,7 +281,13 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
             infos=infos,
             dones=dones,
         )
+        # qtodo: split reward
         for traj_index, traj in enumerate(fresh_demos):
+            acts_r1 = []
+            acts_r2 = []
+            for acts,  in traj.acts:
+                acts_r1.append(acts[0:3])
+                acts_r2.append(acts[3:6])
             _save_dagger_demo(traj, traj_index, self.save_dir, self.rng)
 
         return next_obs, rews, dones, infos
