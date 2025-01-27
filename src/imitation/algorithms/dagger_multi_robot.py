@@ -19,7 +19,7 @@ from stable_baselines3.common import policies, utils, vec_env
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
 from torch.utils import data as th_data
 
-from imitation.algorithms import base, bc
+from imitation.algorithms import base, bc_multi_robot
 from imitation.data import rollout, serialize, types
 from imitation.util import logger as imit_logger
 from imitation.util import util
@@ -256,7 +256,10 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
 
         mask = self.rng.uniform(0, 1, size=(self.num_envs,)) > self.beta
         if np.sum(mask) != 0:
-            actual_acts[mask] = self.get_robot_acts(self._last_obs[mask])
+            acts_r1 = self.get_robot_acts(self._last_obs[mask,0,:])
+            acts_r2 = self.get_robot_acts(self._last_obs[mask,1,:])
+            acts_conc = np.concatenate((acts_r1, acts_r2), axis=1)
+            actual_acts[mask] = acts_conc
 
         self._last_user_actions = actions
         self.venv.step_async(actual_acts)
@@ -281,14 +284,18 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
             infos=infos,
             dones=dones,
         )
+        n_robots = 2
+        action_space = len(self._last_user_actions)//n_robots
         # qtodo: split reward
         for traj_index, traj in enumerate(fresh_demos):
-            acts_r1 = []
-            acts_r2 = []
-            for acts,  in traj.acts:
-                acts_r1.append(acts[0:3])
-                acts_r2.append(acts[3:6])
-            _save_dagger_demo(traj, traj_index, self.save_dir, self.rng)
+            for n in range(n_robots):
+                acts_single_robot = traj.acts[:, n*3:(n+1)*3]
+                obs_single_robot = traj.obs[:, n, :]
+                # todo: reward and info per robot
+                traj_single_robot = types.TrajectoryWithRew(rews=traj.rews, terminal=traj.terminal, obs=obs_single_robot, acts=acts_single_robot, infos=traj.infos)
+                _save_dagger_demo(traj_single_robot, traj_index*10+n+1, self.save_dir, self.rng)
+
+
 
         return next_obs, rews, dones, infos
 
@@ -587,7 +594,7 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
             scratch_dir: types.AnyPath,
             rng: np.random.Generator,
             beta_schedule: Optional[Callable[[int], float]] = None,
-            bc_trainer: bc.BC,
+            bc_trainer: bc_multi_robot.BC,
             custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
     ):
         """Builds DAggerTrainer.
