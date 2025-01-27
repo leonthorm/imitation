@@ -467,6 +467,7 @@ def generate_trajectories_2_robots(
             obs_conc,
             (np.ndarray, dict),
         ), "Tuple observations are not supported."
+        # todo: check for multiple venvs
         obs_r1 = np.expand_dims(obs_conc[0][0], axis=0)
         obs_r2 = np.expand_dims(obs_conc[0][1], axis=0)
         wrapped_obs_r1 = types.maybe_wrap_in_dictobs(obs_r1)
