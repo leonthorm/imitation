@@ -171,6 +171,7 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
             beta: float,
             save_dir: types.AnyPath,
             rng: np.random.Generator,
+            n_robots: int
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -758,7 +759,9 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
         logging.info(f"New round number is {self.round_num}")
         return self.round_num
 
-    def create_trajectory_collector(self) -> InteractiveTrajectoryCollector:
+    def create_trajectory_collector(self,
+                                    n_robots = 1,
+                                    ) -> InteractiveTrajectoryCollector:
         """Create trajectory collector to extend current round's demonstration set.
 
         Returns:
@@ -774,6 +777,7 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
             beta=beta,
             save_dir=save_dir,
             rng=self.rng,
+            n_robots=n_robots,
         )
         return collector
 
