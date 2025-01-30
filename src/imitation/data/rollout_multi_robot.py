@@ -4,6 +4,7 @@ import collections
 import dataclasses
 import logging
 from copy import deepcopy
+from itertools import chain
 from typing import (
     Any,
     Callable,
@@ -25,7 +26,7 @@ from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import VecEnv
 
-from imitation.data import types
+from imitation.data import types, rollout
 
 
 def unwrap_traj(traj: types.TrajectoryWithRew) -> types.TrajectoryWithRew:
@@ -380,11 +381,12 @@ def policy_to_callable(
     return get_actions
 
 
-def generate_trajectories_2_robots(
+def generate_trajectories_multi_robot(
     policy: AnyPolicy,
     venv: VecEnv,
     sample_until: GenTrajTerminationFn,
     rng: np.random.Generator,
+    n_robots: int,
     *,
     deterministic_policy: bool = False,
 ) -> Sequence[types.TrajectoryWithRew]:
@@ -411,34 +413,29 @@ def generate_trajectories_2_robots(
         should truncate if required.
     """
     get_actions = policy_to_callable(policy, venv, deterministic_policy)
-
     # Collect rollout tuples.
-    trajectories_r1 = []
-    trajectories_r2 = []
+    traj_list = [[] for _ in range(n_robots)]
+
     # accumulator for incomplete trajectories
-    trajectories_accum_r1 = TrajectoryAccumulator()
-    trajectories_accum_r2 = TrajectoryAccumulator()
-    obs_conc = venv.reset()
+    trajectories_accum_list = [TrajectoryAccumulator() for _ in range(n_robots)]
+
+    obs = venv.reset()
     assert isinstance(
-        obs_conc,
+        obs,
         (np.ndarray, dict),
     ), "Tuple observations are not supported."
-    obs_r1 = np.expand_dims(obs_conc[0][0], axis=0)
-    obs_r2 = np.expand_dims(obs_conc[0][1], axis=0)
-    wrapped_obs_r1 = types.maybe_wrap_in_dictobs(obs_r1)
-    wrapped_obs_r2 = types.maybe_wrap_in_dictobs(obs_r2)
+    wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(n_robots)]
 
     # we use dictobs to iterate over the envs in a vecenv
-    for env_idx, ob in enumerate(wrapped_obs_r1):
-        # Seed with first obs only. Inside loop, we'll only add second obs from
-        # each (s,a,r,s') tuple, under the same "obs" key again. That way we still
-        # get all observations, but they're not duplicated into "next obs" and
-        # "previous obs" (this matters for, e.g., Atari, where observations are
-        # really big).
-        trajectories_accum_r1.add_step(dict(obs=ob), env_idx)
-
-    for env_idx, ob in enumerate(wrapped_obs_r2):
-        trajectories_accum_r2.add_step(dict(obs=ob), env_idx)
+    #todo: check multi venv
+    for n in range(n_robots):
+        for env_idx, ob in enumerate(wrapped_obs_list[n]):
+            # Seed with first obs only. Inside loop, we'll only add second obs from
+            # each (s,a,r,s') tuple, under the same "obs" key again. That way we still
+            # get all observations, but they're not duplicated into "next obs" and
+            # "previous obs" (this matters for, e.g., Atari, where observations are
+            # really big).
+            trajectories_accum_list[n].add_step(dict(obs=ob), env_idx)
 
     # Now, we sample until `sample_until(trajectories)` is true.
     # If we just stopped then this would introduce a bias towards shorter episodes,
@@ -448,30 +445,39 @@ def generate_trajectories_2_robots(
     #
     # To start with, all environments are active.
     active = np.ones(venv.num_envs, dtype=bool)
-    state_r1 = None
-    state_r2 = None
+    states = [None] * n_robots
     dones = np.zeros(venv.num_envs, dtype=bool)
     while np.any(active):
         # policy gets unwrapped observations (eg as dict, not dictobs)
-        acts_r1, state_r1 = get_actions(obs_r1, state_r1, dones)
-        acts_r2, state_r2 = get_actions(obs_r2, state_r2, dones)
-        acts_conc = np.concatenate((acts_r1, acts_r2), axis=1)
-        obs_conc, rews, dones, infos = venv.step(acts_conc)
+        acts = []
+        for n in range(n_robots):
+            # todo: check multi venv
+            act_n, states[n] = get_actions(obs[:, n], states[n], dones)
+            acts.append(act_n)
+        obs, rews, dones, infos = venv.step(np.concatenate(acts, axis=1))
+        # todo: handle different infos
+        infos_robots = [deepcopy(infos) for _ in range(n_robots)]
 
-        infos_r1, infos_r2 = deepcopy(infos), deepcopy(infos)
-        if dones[0] == True:
-            infos_r1[0]["terminal_observation"] = infos_r1[0]["terminal_observation"][0]
-            infos_r2[0]["terminal_observation"] = infos_r2[0]["terminal_observation"][1]
+        #  Handle terminal observations for each robot if necessary
+        done_indices = np.where(dones)[0]  # Get indices where `dones` is True
+        for n in range(n_robots):
+            for done_idx in done_indices:
+                infos_robots[n][done_idx]["terminal_observation"] = infos_robots[n][done_idx]["terminal_observation"][n]
+
+        #
+        # if dones[0]:
+        #     for n in range(n_robots):
+        #         print(infos_robots[:, n])
+        #         print(infos_robots[:, n][0])
+        #         print(infos_robots[:, n][0]["terminal_observation"])
+        #         infos_robots[n][0]["terminal_observation"] = infos_robots[n][0]["terminal_observation"][n]
 
         assert isinstance(
-            obs_conc,
+            obs,
             (np.ndarray, dict),
         ), "Tuple observations are not supported."
         # todo: check for multiple venvs
-        obs_r1 = np.expand_dims(obs_conc[0][0], axis=0)
-        obs_r2 = np.expand_dims(obs_conc[0][1], axis=0)
-        wrapped_obs_r1 = types.maybe_wrap_in_dictobs(obs_r1)
-        wrapped_obs_r2 = types.maybe_wrap_in_dictobs(obs_r2)
+        wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(n_robots)]
 
         # If an environment is inactive, i.e. the episode completed for that
         # environment after `sample_until(trajectories)` was true, then we do
@@ -479,26 +485,19 @@ def generate_trajectories_2_robots(
         # by just making it never done.
         dones &= active
 
-        new_trajs_r1 = trajectories_accum_r1.add_steps_and_auto_finish(
-            acts_r1,
-            wrapped_obs_r1,
-            rews,
-            dones,
-            infos_r1,
-        )
-        trajectories_r1.extend(new_trajs_r1)
+        for n in range(n_robots):
+            new_trajs = trajectories_accum_list[n].add_steps_and_auto_finish(
+                acts[n],
+                wrapped_obs_list[n],
+                rews,
+                dones,
+                infos_robots[n]
+            )
+            traj_list[n].extend(new_trajs)
 
-        new_trajs_r2 = trajectories_accum_r2.add_steps_and_auto_finish(
-                    acts_r2,
-                    wrapped_obs_r2,
-                    rews,
-                    dones,
-                    infos_r2,
-                )
-        trajectories_r2.extend(new_trajs_r2)
 
         #todo check for different traj lenghts
-        if sample_until(trajectories_r1):
+        if sample_until(traj_list[0]):
             # Termination condition has been reached. Mark as inactive any
             # environments where a trajectory was completed this timestep.
             active &= ~dones
@@ -510,57 +509,37 @@ def generate_trajectories_2_robots(
     # `trajectories` sooner. Shuffle to avoid bias in order. This is important
     # when callees end up truncating the number of trajectories or transitions.
     # It is also cheap, since we're just shuffling pointers.
-    rng.shuffle(trajectories_r1)  # type: ignore[arg-type]
-    rng.shuffle(trajectories_r2)  # type: ignore[arg-type]
+    for trajectories in traj_list:
+        rng.shuffle(trajectories)
 
     # Sanity checks.
-    for trajectory in trajectories_r1:
-        n_steps = len(trajectory.acts)
-        # extra 1 for the end
-        if isinstance(venv.observation_space, spaces.Dict):
-            exp_obs = {}
-            for k, v in venv.observation_space.items():
-                assert v.shape is not None
-                exp_obs[k] = (n_steps + 1,) + v.shape
-        else:
-            obs_space_shape = venv.observation_space.shape
-            assert obs_space_shape is not None
-            exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
-        real_obs = trajectory.obs.shape
-        # assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
-        assert venv.action_space.shape is not None
-        exp_act = (n_steps,) + venv.action_space.shape
-        real_act = trajectory.acts.shape
-        # assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
-        exp_rew = (n_steps,)
-        real_rew = trajectory.rews.shape
-        assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
+    for trajectories in traj_list:
+        for trajectory in trajectories:
+            n_steps = len(trajectory.acts)
+            # extra 1 for the end
+            if isinstance(venv.observation_space, spaces.Dict):
+                exp_obs = {}
+                for k, v in venv.observation_space.items():
+                    assert v.shape is not None
+                    exp_obs[k] = (n_steps + 1,) + v.shape
+            else:
+                obs_space_shape = venv.observation_space.shape
+                assert obs_space_shape is not None
+                exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
+            real_obs = (trajectory.obs.shape[0], n_robots, trajectory.obs.shape[1])
+            assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
+            assert venv.action_space.shape is not None
+            exp_act = (n_steps,) + venv.action_space.shape
+            real_act = (trajectory.acts.shape[0], n_robots * trajectory.acts.shape[1])
+            assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
+            exp_rew = (n_steps,)
+            real_rew = trajectory.rews.shape
+            assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
 
-    for trajectory in trajectories_r2:
-        n_steps = len(trajectory.acts)
-        # extra 1 for the end
-        if isinstance(venv.observation_space, spaces.Dict):
-            exp_obs = {}
-            for k, v in venv.observation_space.items():
-                assert v.shape is not None
-                exp_obs[k] = (n_steps + 1,) + v.shape
-        else:
-            obs_space_shape = venv.observation_space.shape
-            assert obs_space_shape is not None
-            exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
-        real_obs = trajectory.obs.shape
-        # assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
-        assert venv.action_space.shape is not None
-        exp_act = (n_steps,) + venv.action_space.shape
-        real_act = trajectory.acts.shape
-        # assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
-        exp_rew = (n_steps,)
-        real_rew = trajectory.rews.shape
-        assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
-
-    trajectories = trajectories_r1
-    trajectories.extend(trajectories_r2)
-    return trajectories
+    trajs = traj_list[0]
+    for n in range(1, n_robots):
+        trajs.extend(traj_list[n])
+    return trajs
 
 
 def rollout_stats(
