@@ -26,7 +26,7 @@ from stable_baselines3.common.policies import BasePolicy
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import VecEnv
 
-from imitation.data import types
+from imitation.data import types, rollout
 
 
 def unwrap_traj(traj: types.TrajectoryWithRew) -> types.TrajectoryWithRew:
@@ -457,9 +457,19 @@ def generate_trajectories_multi_robot(
         obs, rews, dones, infos = venv.step(np.concatenate(acts, axis=1))
         # todo: handle different infos
         infos_robots = [deepcopy(infos) for _ in range(n_robots)]
-        # # Handle terminal observations for each robot if necessary
+
+        #  Handle terminal observations for each robot if necessary
+        done_indices = np.where(dones)[0]  # Get indices where `dones` is True
+        for n in range(n_robots):
+            for done_idx in done_indices:
+                infos_robots[n][done_idx]["terminal_observation"] = infos_robots[n][done_idx]["terminal_observation"][n]
+
+        #
         # if dones[0]:
         #     for n in range(n_robots):
+        #         print(infos_robots[:, n])
+        #         print(infos_robots[:, n][0])
+        #         print(infos_robots[:, n][0]["terminal_observation"])
         #         infos_robots[n][0]["terminal_observation"] = infos_robots[n][0]["terminal_observation"][n]
 
         assert isinstance(
@@ -516,42 +526,20 @@ def generate_trajectories_multi_robot(
                 obs_space_shape = venv.observation_space.shape
                 assert obs_space_shape is not None
                 exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
-            real_obs = trajectory.obs.shape
+            real_obs = (trajectory.obs.shape[0], n_robots, trajectory.obs.shape[1])
             assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
             assert venv.action_space.shape is not None
             exp_act = (n_steps,) + venv.action_space.shape
-            real_act = trajectory.acts.shape
+            real_act = (trajectory.acts.shape[0], n_robots * trajectory.acts.shape[1])
             assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
             exp_rew = (n_steps,)
             real_rew = trajectory.rews.shape
             assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
 
-
-    # for trajectory in trajectories_r1:
-    #     n_steps = len(trajectory.acts)
-    #     # extra 1 for the end
-    #     if isinstance(venv.observation_space, spaces.Dict):
-    #         exp_obs = {}
-    #         for k, v in venv.observation_space.items():
-    #             assert v.shape is not None
-    #             exp_obs[k] = (n_steps + 1,) + v.shape
-    #     else:
-    #         obs_space_shape = venv.observation_space.shape
-    #         assert obs_space_shape is not None
-    #         exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
-    #     real_obs = trajectory.obs.shape
-    #     # assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
-    #     assert venv.action_space.shape is not None
-    #     exp_act = (n_steps,) + venv.action_space.shape
-    #     real_act = trajectory.acts.shape
-    #     # assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
-    #     exp_rew = (n_steps,)
-    #     real_rew = trajectory.rews.shape
-    #     assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
-
-    trajectories = list(chain(*trajectories))
-
-    return trajectories
+    trajs = traj_list[0]
+    for n in range(1, n_robots):
+        trajs.extend(traj_list[n])
+    return trajs
 
 
 def rollout_stats(

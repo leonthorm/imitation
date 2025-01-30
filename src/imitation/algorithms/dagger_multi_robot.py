@@ -18,14 +18,12 @@ import torch as th
 from stable_baselines3.common import policies, utils, vec_env
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
 from torch.utils import data as th_data
-from gymnasium import Space
+from gymnasium.spaces import Box, Space
 
 from imitation.algorithms import base, bc_multi_robot
-from imitation.data import rollout, serialize, types
+from imitation.data import rollout_multi_robot, serialize, types
 from imitation.util import logger as imit_logger
 from imitation.util import util
-
-from src.imitation.util.util_multi_robot import check_for_correct_spaces_multi_robot
 
 
 class BetaSchedule(abc.ABC):
@@ -163,7 +161,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
     of every episode.
     """
 
-    traj_accum: Optional[rollout.TrajectoryAccumulator]
+    traj_accum: Optional[rollout_multi_robot.TrajectoryAccumulator]
     _last_obs: Optional[np.ndarray]
     _last_user_actions: Optional[np.ndarray]
 
@@ -175,8 +173,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             save_dir: types.AnyPath,
             rng: np.random.Generator,
             n_robots: int,
-            action_space: Space,
-            observation_space: Space,
+            actions_size_single_robot: int
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -205,6 +202,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self._last_user_actions = None
         self.rng = rng
         self.n_robots = n_robots
+        self.actions_size_single_robot = actions_size_single_robot
 
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
@@ -229,7 +227,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         Returns:
             obs: first observation of a new trajectory.
         """
-        self.traj_accum = rollout.TrajectoryAccumulator()
+        self.traj_accum = rollout_multi_robot.TrajectoryAccumulator()
         obs = self.venv.reset()
         assert isinstance(obs, np.ndarray)
         for i, ob in enumerate(obs):
@@ -303,7 +301,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         for traj_index, traj in enumerate(fresh_demos):
             for n in range(self.n_robots):
                 obs_nth_robot = traj.obs[:, n, :]
-                acts_nth_robot = traj.acts[:, n*self.action_space.shape:(n+1)*self.action_space.shape]
+                acts_nth_robot = traj.acts[:, n*self.actions_size_single_robot:(n+1)*self.actions_size_single_robot]
                 # todo: reward and info per robot
                 traj_nth_robot = types.TrajectoryWithRew(
                     rews=traj.rews, terminal=traj.terminal, obs=obs_nth_robot, acts=acts_nth_robot, infos=traj.infos
@@ -325,7 +323,7 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
     of every episode.
     """
 
-    traj_accum: Optional[rollout.TrajectoryAccumulator]
+    traj_accum: Optional[rollout_multi_robot        .TrajectoryAccumulator]
     _last_obs: Optional[np.ndarray]
     _last_user_actions: Optional[np.ndarray]
 
@@ -404,7 +402,7 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
         Returns:
             obs: first observation of a new trajectory.
         """
-        self.traj_accum = rollout.TrajectoryAccumulator()
+        self.traj_accum = rollout_multi_robot.TrajectoryAccumulator()
         obs = self.venv.reset()
         assert isinstance(obs, np.ndarray)
         for i, ob in enumerate(obs):
@@ -607,7 +605,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             scratch_dir: types.AnyPath,
             rng: np.random.Generator,
             beta_schedule: Optional[Callable[[int], float]] = None,
-            bc_trainer: bc_multi_robot.BC,
+            bc_trainer: bc_multi_robot.BCMultiRobot,
             custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
             n_robots: int
     ):
@@ -637,13 +635,17 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
         self.rng = rng
 
         # TODO check check
-        observation_space_shape = (n_robots, bc_trainer.observation_space.shape )
-        print("observation_space_shape: {}".format(observation_space_shape))
-        check_observation_space = Space(shape=observation_space_shape, dtype=bc_trainer.observation_space.dtype)
+        observation_space_shape = (n_robots, bc_trainer.observation_space.shape[0] )
+        # print("observation_space_shape: {}".format(observation_space_shape))
+        # check_observation_space = Space(shape=observation_space_shape, dtype=bc_trainer.observation_space.dtype)
 
-        action_space_shape = n_robots*bc_trainer.action_space.shape
-        print("action_space_shape: {}".format(action_space_shape))
-        check_action_space = Space(shape=observation_space_shape, dtype=bc_trainer.action_space.dtype)
+        action_space_shape = (n_robots*bc_trainer.action_space.shape[0],)
+        # print("action_space_shape: {}".format(action_space_shape))
+        # check_action_space = Space(shape=action_space_shape, dtype=bc_trainer.action_space.dtype)
+
+        check_observation_space = Box(low=-np.inf, high=np.inf,
+                                shape=(n_robots, bc_trainer.observation_space.shape[0]), dtype=np.float64)
+        check_action_space = Box(low=-10.0, high=10.0, shape=(n_robots*bc_trainer.action_space.shape[0],), dtype=np.float64)
 
         utils.check_for_correct_spaces(
             self.venv,
@@ -687,7 +689,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             self._all_demos.extend(serialize.load(p)[0] for p in demo_paths)
             num_demos_by_round.append(len(demo_paths))
         logging.info(f"Loaded {len(self._all_demos)} total")
-        demo_transitions = rollout.flatten_trajectories(self._all_demos)
+        demo_transitions = rollout_multi_robot.flatten_trajectories(self._all_demos)
         return demo_transitions, num_demos_by_round
 
     def _get_demo_paths(self, round_dir: pathlib.Path) -> List[pathlib.Path]:
@@ -781,9 +783,8 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
         return self.round_num
 
     def create_trajectory_collector_multi_robot(self,
-                                                action_space: Space,
-                                                observation_space: Space,
-                                                n_robots = 1,
+                                                actions_size_single_robot: int,
+                                                n_robots: int = 1,
                                                 ) -> InteractiveTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
 
@@ -801,8 +802,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             save_dir=save_dir,
             rng=self.rng,
             n_robots=n_robots,
-            action_space=action_space,
-            observation_space=observation_space
+            actions_size_single_robot=actions_size_single_robot,
 
         )
         return collector

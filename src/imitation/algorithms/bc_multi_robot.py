@@ -188,13 +188,15 @@ class RolloutStatsComputer:
         self,
         policy: policies.ActorCriticPolicy,
         rng: np.random.Generator,
+        n_robots: int
     ) -> Mapping[str, float]:
         if self.venv is not None and self.n_episodes > 0:
-            trajs = rollout_multi_robot.generate_trajectories_2_robots(
+            trajs = rollout_multi_robot.generate_trajectories_multi_robot(
                 policy,
                 self.venv,
                 rollout_multi_robot.make_min_episodes(self.n_episodes),
                 rng=rng,
+                n_robots=n_robots,
             )
             return rollout_multi_robot.rollout_stats(trajs)
         else:
@@ -265,7 +267,7 @@ def reconstruct_policy(
     return policy
 
 
-class BC(algo_base.DemonstrationAlgorithm):
+class BCMultiRobot(algo_base.DemonstrationAlgorithm):
     """Behavioral cloning (BC).
 
     Recovers a policy via supervised learning from observation-action pairs.
@@ -279,6 +281,7 @@ class BC(algo_base.DemonstrationAlgorithm):
         rng: np.random.Generator,
         policy: Optional[policies.ActorCriticPolicy] = None,
         demonstrations: Optional[algo_base.AnyTransitions] = None,
+        n_robots: int,
         batch_size: int = 32,
         minibatch_size: Optional[int] = None,
         optimizer_cls: Type[th.optim.Optimizer] = th.optim.Adam,
@@ -367,7 +370,7 @@ class BC(algo_base.DemonstrationAlgorithm):
         )
 
         self.loss_calculator = BehaviorCloningLossCalculator(ent_weight, l2_weight)
-
+        self.n_robots = n_robots
     @property
     def policy(self) -> policies.ActorCriticPolicy:
         return self._policy
@@ -466,7 +469,7 @@ class BC(algo_base.DemonstrationAlgorithm):
             self.optimizer.zero_grad()
 
             if batch_num % log_interval == 0:
-                rollout_stats = compute_rollout_stats(self.policy, self.rng)
+                rollout_stats = compute_rollout_stats(self.policy, self.rng, self.n_robots)
 
                 self._bc_logger.log_batch(
                     batch_num,
