@@ -18,11 +18,14 @@ import torch as th
 from stable_baselines3.common import policies, utils, vec_env
 from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
 from torch.utils import data as th_data
+from gymnasium import Space
 
 from imitation.algorithms import base, bc_multi_robot
 from imitation.data import rollout, serialize, types
 from imitation.util import logger as imit_logger
 from imitation.util import util
+
+from src.imitation.util.util_multi_robot import check_for_correct_spaces_multi_robot
 
 
 class BetaSchedule(abc.ABC):
@@ -171,7 +174,9 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             beta: float,
             save_dir: types.AnyPath,
             rng: np.random.Generator,
-            n_robots: int
+            n_robots: int,
+            action_space: Space,
+            observation_space: Space,
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -185,6 +190,8 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
                 randomized for each individual `Env` at every timestep.
             save_dir: directory to save collected trajectories in.
             rng: random state for random number generation.
+            n_robots: number of robots for which to sample trajectories. Each robot
+                needs to have the same action and observation space.
         """
         super().__init__(venv)
         self.get_robot_acts = get_robot_acts
@@ -197,6 +204,8 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self._is_reset = False
         self._last_user_actions = None
         self.rng = rng
+        self.n_robots = n_robots
+
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
         """Set the seed for the DAgger random number generator and wrapped VecEnv.
@@ -257,10 +266,15 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
 
         mask = self.rng.uniform(0, 1, size=(self.num_envs,)) > self.beta
         if np.sum(mask) != 0:
-            acts_r1 = self.get_robot_acts(self._last_obs[mask,0,:])
-            acts_r2 = self.get_robot_acts(self._last_obs[mask,1,:])
-            acts_conc = np.concatenate((acts_r1, acts_r2), axis=1)
-            actual_acts[mask] = acts_conc
+            # todo: check if this makes sense for multiple venv
+            # acts_conc = np.array()
+            # for n in range(self.n_robots):
+                # acts_nth_robot = self.get_robot_acts(self._last_obs[mask, n, :])
+                # acts_conc = np.concatenate((acts_conc, acts_nth_robot), axis=1)
+                #
+
+            acts_list = [self.get_robot_acts(self._last_obs[mask, n, :]) for n in range(self.n_robots)]
+            actual_acts[mask] = np.hstack(acts_list)
 
         self._last_user_actions = actions
         self.venv.step_async(actual_acts)
@@ -285,18 +299,16 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             infos=infos,
             dones=dones,
         )
-        n_robots = 2
-        action_space = len(self._last_user_actions)//n_robots
-        # qtodo: split reward
+        # todo: split reward
         for traj_index, traj in enumerate(fresh_demos):
-            for n in range(n_robots):
-                acts_single_robot = traj.acts[:, n*3:(n+1)*3]
-                obs_single_robot = traj.obs[:, n, :]
+            for n in range(self.n_robots):
+                obs_nth_robot = traj.obs[:, n, :]
+                acts_nth_robot = traj.acts[:, n*self.action_space.shape:(n+1)*self.action_space.shape]
                 # todo: reward and info per robot
-                traj_single_robot = types.TrajectoryWithRew(rews=traj.rews, terminal=traj.terminal, obs=obs_single_robot, acts=acts_single_robot, infos=traj.infos)
-                _save_dagger_demo(traj_single_robot, traj_index*10+n+1, self.save_dir, self.rng)
-
-
+                traj_nth_robot = types.TrajectoryWithRew(
+                    rews=traj.rews, terminal=traj.terminal, obs=obs_nth_robot, acts=acts_nth_robot, infos=traj.infos
+                )
+                _save_dagger_demo(traj_nth_robot, traj_index*10+n+1, self.save_dir, self.rng)
 
         return next_obs, rews, dones, infos
 
@@ -553,7 +565,7 @@ class NeedsDemosException(Exception):
     """Signals demos need to be collected for current round before continuing."""
 
 
-class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
+class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
     """DAgger training class with low-level API suitable for interactive human feedback.
 
     In essence, this is just BC with some helpers for incrementally
@@ -597,6 +609,7 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
             beta_schedule: Optional[Callable[[int], float]] = None,
             bc_trainer: bc_multi_robot.BC,
             custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+            n_robots: int
     ):
         """Builds DAggerTrainer.
 
@@ -623,12 +636,20 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
         self._all_demos = []
         self.rng = rng
 
-        # TODO implement check
-        # utils.check_for_correct_spaces(
-        #     self.venv,
-        #     bc_trainer.observation_space,
-        #     bc_trainer.action_space,
-        # )
+        # TODO check check
+        observation_space_shape = (n_robots, bc_trainer.observation_space.shape )
+        print("observation_space_shape: {}".format(observation_space_shape))
+        check_observation_space = Space(shape=observation_space_shape, dtype=bc_trainer.observation_space.dtype)
+
+        action_space_shape = n_robots*bc_trainer.action_space.shape
+        print("action_space_shape: {}".format(action_space_shape))
+        check_action_space = Space(shape=observation_space_shape, dtype=bc_trainer.action_space.dtype)
+
+        utils.check_for_correct_spaces(
+            self.venv,
+            check_observation_space,
+            check_action_space,
+        )
         self.bc_trainer = bc_trainer
         self.bc_trainer.logger = self.logger
 
@@ -760,6 +781,8 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
         return self.round_num
 
     def create_trajectory_collector_multi_robot(self,
+                                                action_space: Space,
+                                                observation_space: Space,
                                                 n_robots = 1,
                                                 ) -> InteractiveTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
@@ -778,6 +801,9 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
             save_dir=save_dir,
             rng=self.rng,
             n_robots=n_robots,
+            action_space=action_space,
+            observation_space=observation_space
+
         )
         return collector
 
