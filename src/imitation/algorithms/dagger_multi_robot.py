@@ -148,7 +148,7 @@ def _save_dagger_demo(
     logging.info(f"Saved demo at '{npz_path}'")
 
 
-class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
+class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
     """DAgger VecEnvWrapper for querying and saving expert actions.
 
     Every call to `.step(actions)` accepts and saves expert actions to `self.save_dir`,
@@ -759,9 +759,9 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
         logging.info(f"New round number is {self.round_num}")
         return self.round_num
 
-    def create_trajectory_collector(self,
-                                    n_robots = 1,
-                                    ) -> InteractiveTrajectoryCollector:
+    def create_trajectory_collector_multi_robot(self,
+                                                n_robots = 1,
+                                                ) -> InteractiveTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
 
         Returns:
@@ -771,7 +771,7 @@ class DAggerTrainer2Robot(base.BaseImitationAlgorithm):
         """
         save_dir = self._demo_dir_path_for_round()
         beta = self.beta_schedule(self.round_num)
-        collector = InteractiveTrajectoryCollector(
+        collector = InteractiveTrajectoryCollectorMultiRobot(
             venv=self.venv,
             get_robot_acts=lambda acts: self.bc_trainer.policy.predict(acts)[0],
             beta=beta,
