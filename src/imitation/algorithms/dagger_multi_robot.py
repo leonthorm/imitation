@@ -372,7 +372,7 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self.switch2robot_thresh = switch2robot_thresh
         self.switch2robot_thresh2 = switch2robot_thresh2
         self.n_robots = n_robots
-        self.expert_mode = [[False] * self.n_robots] * self.venv.num_envs
+        self.expert_mode = [ [ False for _ in range(self.n_robots)] for _ in range(self.num_envs) ]
         self.estimates = [ [ [] for _ in range(self.n_robots)] for _ in range(self.num_envs) ]
         self.estimates2 = [ [ [] for _ in range(self.n_robots)] for _ in range(self.num_envs) ]
         self.target_rate = 0.01
