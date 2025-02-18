@@ -675,8 +675,8 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
 
         check_observation_space = Box(low=-np.inf, high=np.inf,
                                       shape=(n_robots, bc_trainer.observation_space.shape[0]), dtype=np.float64)
-        check_action_space = Box(low=-10.0, high=10.0, shape=(n_robots * bc_trainer.action_space.shape[0],),
-                                 dtype=np.float64)
+        check_action_space = Box(low=0.0, high=0.14, shape=(n_robots * bc_trainer.action_space.shape[0],),
+                                 dtype=np.float32)
 
         utils.check_for_correct_spaces(
             self.venv,
