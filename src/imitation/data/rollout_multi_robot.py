@@ -449,12 +449,18 @@ def generate_trajectories_multi_robot(
     dones = np.zeros(venv.num_envs, dtype=bool)
     while np.any(active):
         # policy gets unwrapped observations (eg as dict, not dictobs)
-        acts = []
-        for n in range(n_robots):
-            # todo: check multi venv
-            act_n, states[n] = get_actions(obs[:, n], states[n], dones)
-            acts.append(act_n)
-        obs, rews, dones, infos = venv.step(np.concatenate(acts, axis=1))
+        # acts = []
+        # for n in range(n_robots):
+        #     # todo: check multi venv
+        #     act_n, states[n] = get_actions(obs[:, n], states[n], dones)
+        #     acts.append(act_n)
+        acts, _ = get_actions(obs, None, dones)
+        # for n in range(n_robots):
+        #     # todo: check multi venv
+        #     act_n, states[n] = get_actions(obs[:, n], states[n], dones)
+        #     acts.append(act_n)
+        # obs, rews, dones, infos = venv.step(np.concatenate(acts, axis=1))
+        obs, rews, dones, infos = venv.step(acts)
         # todo: handle different infos
         infos_robots = [deepcopy(infos) for _ in range(n_robots)]
 
