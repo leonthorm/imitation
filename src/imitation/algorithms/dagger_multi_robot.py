@@ -966,7 +966,6 @@ def get_policy_obs(num_robots, robot, cable_lengths, obs):
     state_d = obs[state_d_start_idx:payload_acc_start_idx]
     payload_acc_d = obs[payload_acc_start_idx:action_d_start_idx]
     action_d = obs[action_d_start_idx:]
-    test = 'test'
     payload_pos_e = state_d[0:3] - state[0:3]
     payload_vel_e = state_d[3:6] - state[3:6]
 
