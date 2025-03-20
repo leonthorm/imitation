@@ -166,7 +166,9 @@ class AgentTrainer(TrajectoryGenerator):
             )
             reward_fn = reward_fn.predict_processed
         self.reward_fn = reward_fn
-        self.exploration_frac = exploration_frac
+        
+        self.exploration_frac = explor
+        ation_frac
         self.rng = rng
 
         # The BufferingWrapper records all trajectories, so we can return

@@ -386,7 +386,7 @@ def generate_trajectories_multi_robot(
     venv: VecEnv,
     sample_until: GenTrajTerminationFn,
     rng: np.random.Generator,
-    n_robots: int,
+    num_robots: int,
     *,
     deterministic_policy: bool = False,
 ) -> Sequence[types.TrajectoryWithRew]:
@@ -414,21 +414,21 @@ def generate_trajectories_multi_robot(
     """
     get_actions = policy_to_callable(policy, venv, deterministic_policy)
     # Collect rollout tuples.
-    traj_list = [[] for _ in range(n_robots)]
+    traj_list = [[] for _ in range(num_robots)]
 
     # accumulator for incomplete trajectories
-    trajectories_accum_list = [TrajectoryAccumulator() for _ in range(n_robots)]
+    trajectories_accum_list = [TrajectoryAccumulator() for _ in range(num_robots)]
 
     obs = venv.reset()
     assert isinstance(
         obs,
         (np.ndarray, dict),
     ), "Tuple observations are not supported."
-    wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(n_robots)]
+    wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(num_robots)]
 
     # we use dictobs to iterate over the envs in a vecenv
     #todo: check multi venv
-    for n in range(n_robots):
+    for n in range(num_robots):
         for env_idx, ob in enumerate(wrapped_obs_list[n]):
             # Seed with first obs only. Inside loop, we'll only add second obs from
             # each (s,a,r,s') tuple, under the same "obs" key again. That way we still
@@ -445,34 +445,34 @@ def generate_trajectories_multi_robot(
     #
     # To start with, all environments are active.
     active = np.ones(venv.num_envs, dtype=bool)
-    states = [None] * n_robots
+    states = [None] * num_robots
     dones = np.zeros(venv.num_envs, dtype=bool)
     while np.any(active):
         # policy gets unwrapped observations (eg as dict, not dictobs)
         # acts = []
-        # for n in range(n_robots):
+        # for n in range(num_robots):
         #     # todo: check multi venv
         #     act_n, states[n] = get_actions(obs[:, n], states[n], dones)
         #     acts.append(act_n)
         acts, _ = get_actions(obs, None, dones)
-        # for n in range(n_robots):
+        # for n in range(num_robots):
         #     # todo: check multi venv
         #     act_n, states[n] = get_actions(obs[:, n], states[n], dones)
         #     acts.append(act_n)
         # obs, rews, dones, infos = venv.step(np.concatenate(acts, axis=1))
         obs, rews, dones, infos = venv.step(acts)
         # todo: handle different infos
-        infos_robots = [deepcopy(infos) for _ in range(n_robots)]
+        infos_robots = [deepcopy(infos) for _ in range(num_robots)]
 
         #  Handle terminal observations for each robot if necessary
         done_indices = np.where(dones)[0]  # Get indices where `dones` is True
-        for n in range(n_robots):
+        for n in range(num_robots):
             for done_idx in done_indices:
                 infos_robots[n][done_idx]["terminal_observation"] = infos_robots[n][done_idx]["terminal_observation"][n]
 
         #
         # if dones[0]:
-        #     for n in range(n_robots):
+        #     for n in range(num_robots):
         #         print(infos_robots[:, n])
         #         print(infos_robots[:, n][0])
         #         print(infos_robots[:, n][0]["terminal_observation"])
@@ -483,7 +483,7 @@ def generate_trajectories_multi_robot(
             (np.ndarray, dict),
         ), "Tuple observations are not supported."
         # todo: check for multiple venvs
-        wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(n_robots)]
+        wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(num_robots)]
 
         # If an environment is inactive, i.e. the episode completed for that
         # environment after `sample_until(trajectories)` was true, then we do
@@ -491,7 +491,7 @@ def generate_trajectories_multi_robot(
         # by just making it never done.
         dones &= active
 
-        for n in range(n_robots):
+        for n in range(num_robots):
             new_trajs = trajectories_accum_list[n].add_steps_and_auto_finish(
                 acts[n],
                 wrapped_obs_list[n],
@@ -532,18 +532,18 @@ def generate_trajectories_multi_robot(
                 obs_space_shape = venv.observation_space.shape
                 assert obs_space_shape is not None
                 exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
-            real_obs = (trajectory.obs.shape[0], n_robots, trajectory.obs.shape[1])
+            real_obs = (trajectory.obs.shape[0], num_robots, trajectory.obs.shape[1])
             assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
             assert venv.action_space.shape is not None
             exp_act = (n_steps,) + venv.action_space.shape
-            real_act = (trajectory.acts.shape[0], n_robots * trajectory.acts.shape[1])
+            real_act = (trajectory.acts.shape[0], num_robots * trajectory.acts.shape[1])
             assert real_act == exp_act, f"expected shape {exp_act}, got {real_act}"
             exp_rew = (n_steps,)
             real_rew = trajectory.rews.shape
             assert real_rew == exp_rew, f"expected shape {exp_rew}, got {real_rew}"
 
     trajs = traj_list[0]
-    for n in range(1, n_robots):
+    for n in range(1, num_robots):
         trajs.extend(traj_list[n])
     return trajs
 

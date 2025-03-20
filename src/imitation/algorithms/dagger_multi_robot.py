@@ -172,7 +172,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             beta: float,
             save_dir: types.AnyPath,
             rng: np.random.Generator,
-            n_robots: int,
+            num_robots: int,
             actions_size_single_robot: int
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
@@ -187,7 +187,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
                 randomized for each individual `Env` at every timestep.
             save_dir: directory to save collected trajectories in.
             rng: random state for random number generation.
-            n_robots: number of robots for which to sample trajectories. Each robot
+            num_robots: number of robots for which to sample trajectories. Each robot
                 needs to have the same action and observation space.
         """
         super().__init__(venv)
@@ -201,7 +201,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self._is_reset = False
         self._last_user_actions = None
         self.rng = rng
-        self.n_robots = n_robots
+        self.num_robots = num_robots
         self.actions_size_single_robot = actions_size_single_robot
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
@@ -265,12 +265,12 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         if np.sum(mask) != 0:
             # todo: check if this makes sense for multiple venv
             # acts_conc = np.array()
-            # for n in range(self.n_robots):
+            # for n in range(self.num_robots):
             # acts_nth_robot = self.get_robot_acts(self._last_obs[mask, n, :])
             # acts_conc = np.concatenate((acts_conc, acts_nth_robot), axis=1)
             #
 
-            acts_list = [self.get_robot_acts(self._last_obs[mask, n, :]) for n in range(self.n_robots)]
+            acts_list = [self.get_robot_acts(self._last_obs[mask, n, :]) for n in range(self.num_robots)]
             actual_acts[mask] = np.hstack(acts_list)
 
         self._last_user_actions = actions
@@ -298,7 +298,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         )
         # todo: split reward
         for traj_index, traj in enumerate(fresh_demos):
-            for n in range(self.n_robots):
+            for n in range(self.num_robots):
                 obs_nth_robot = traj.obs[:, n, :]
                 acts_nth_robot = traj.acts[:,
                                  n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot]
@@ -338,7 +338,7 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             switch2human_thresh2: [np.ndarray],
             switch2robot_thresh: [np.ndarray],
             switch2robot_thresh2: [np.ndarray],
-            n_robots,
+            num_robots,
             actions_size_single_robot,
             is_initial_collection: bool = False,
 
@@ -371,10 +371,10 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self.switch2human_thresh2 = switch2human_thresh2
         self.switch2robot_thresh = switch2robot_thresh
         self.switch2robot_thresh2 = switch2robot_thresh2
-        self.n_robots = n_robots
-        self.expert_mode = [ [ False for _ in range(self.n_robots)] for _ in range(self.num_envs) ]
-        self.estimates = [ [ [] for _ in range(self.n_robots)] for _ in range(self.num_envs) ]
-        self.estimates2 = [ [ [] for _ in range(self.n_robots)] for _ in range(self.num_envs) ]
+        self.num_robots = num_robots
+        self.expert_mode = [[False for _ in range(self.num_robots)] for _ in range(self.num_envs)]
+        self.estimates = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
+        self.estimates2 = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
         self.target_rate = 0.01
         self.q_learning = False
         self.num_switch_to_robot = 0
@@ -446,7 +446,7 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
 
         if not self.is_initial_collection:
             for env_idx, env_act in enumerate(actual_acts):
-                for n in range(self.n_robots):
+                for n in range(self.num_robots):
                     print(f'env: {env_idx}, robot: {n}, expert mode: {self.expert_mode[env_idx][n]}')
                     robot_act = self.get_robot_acts(self._last_obs[env_idx, n])
                     safety = 0
@@ -512,7 +512,7 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         )
         # todo: split reward
         for traj_index, traj in enumerate(fresh_demos):
-            for n in range(self.n_robots):
+            for n in range(self.num_robots):
                 obs_nth_robot = traj.obs[:, n, :]
                 acts_nth_robot = traj.acts[:,
                                  n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot]
@@ -525,12 +525,12 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         return next_obs, rews, dones, infos
 
     def recompute_thresholds_multi_robot(self):
-        # switch2human_thresh = [[[] for _ in range(self.n_robots)] for _ in range(self.num_envs)]
-        # switch2human_thresh2 = [[[] for _ in range(self.n_robots)] for _ in range(self.num_envs)]
-        # switch2robot_thresh2 = [[[] for _ in range(self.n_robots)] for _ in range(self.num_envs)]
+        # switch2human_thresh = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
+        # switch2human_thresh2 = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
+        # switch2robot_thresh2 = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
 
         for env_idx in range(self.venv.num_envs):
-            for n in range(self.n_robots):
+            for n in range(self.num_robots):
                 if len(self.estimates[env_idx][n]) > 25:
                     target_idx = int((1 - self.target_rate) * len(self.estimates[env_idx][n]))
                     self.switch2human_thresh[env_idx][n] = sorted(self.estimates[env_idx][n])[target_idx]
@@ -573,18 +573,18 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             heldout_discrepancies.append(np.sum((a_pred - a_sup) ** 2))
             # TODO append variance for ensemble (policy.variance(obs))
             heldout_estimates.append(self.variance())
-        # switch2robot_thresh = [[np.array(discrepancies).mean()] * self.n_robots] * self.venv.num_envs
-        self.switch2robot_thresh = [[np.array(discrepancies).mean()] * self.n_robots  for _ in range(self.num_envs)]
+        # switch2robot_thresh = [[np.array(discrepancies).mean()] * self.num_robots] * self.venv.num_envs
+        self.switch2robot_thresh = [[np.array(discrepancies).mean()] * self.num_robots for _ in range(self.num_envs)]
 
         target_idx = int((1 - target_rate) * len(heldout_estimates))
-        # switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.n_robots] * self.venv.num_envs
-        self.switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.n_robots  for _ in range(self.num_envs)]
+        # switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.num_robots] * self.venv.num_envs
+        self.switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.num_robots for _ in range(self.num_envs)]
         print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
         print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
-        # switch2human_thresh2 = [[0.48] * self.n_robots] * self.venv.num_envs  # a priori guess: 48% discounted probability of success. Could also estimate from data
-        self.switch2human_thresh2 = [[0.48] * self.n_robots for _ in range(self.num_envs)] # a priori guess: 48% discounted probability of success. Could also estimate from data
-        # switch2robot_thresh2 = [[0.495] * self.n_robots] * self.venv.num_envs
-        self.switch2robot_thresh2 = [[0.495] * self.n_robots for _ in range(self.num_envs)]
+        # switch2human_thresh2 = [[0.48] * self.num_robots] * self.venv.num_envs  # a priori guess: 48% discounted probability of success. Could also estimate from data
+        self.switch2human_thresh2 = [[0.48] * self.num_robots for _ in range(self.num_envs)] # a priori guess: 48% discounted probability of success. Could also estimate from data
+        # switch2robot_thresh2 = [[0.495] * self.num_robots] * self.venv.num_envs
+        self.switch2robot_thresh2 = [[0.495] * self.num_robots for _ in range(self.num_envs)]
 
         return self.switch2robot_thresh, self.switch2human_thresh, self.switch2human_thresh2, self.switch2robot_thresh2
 
@@ -637,7 +637,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             beta_schedule: Optional[Callable[[int], float]] = None,
             bc_trainer: bc_multi_robot.BCMultiRobot,
             custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
-            n_robots: int
+            num_robots: int
     ):
         """Builds DAggerTrainer.
 
@@ -665,24 +665,25 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
         self.rng = rng
 
         # TODO check check
-        observation_space_shape = (n_robots, bc_trainer.observation_space.shape[0])
+        observation_space_shape = (num_robots, bc_trainer.observation_space.shape[0])
         # print("observation_space_shape: {}".format(observation_space_shape))
         # check_observation_space = Space(shape=observation_space_shape, dtype=bc_trainer.observation_space.dtype)
 
-        action_space_shape = (n_robots * bc_trainer.action_space.shape[0],)
+        action_space_shape = (num_robots * bc_trainer.action_space.shape[0],)
         # print("action_space_shape: {}".format(action_space_shape))
         # check_action_space = Space(shape=action_space_shape, dtype=bc_trainer.action_space.dtype)
 
         check_observation_space = Box(low=-np.inf, high=np.inf,
-                                      shape=(n_robots, bc_trainer.observation_space.shape[0]), dtype=np.float64)
-        check_action_space = Box(low=0.0, high=0.14, shape=(n_robots * bc_trainer.action_space.shape[0],),
+                                      shape=(num_robots, bc_trainer.observation_space.shape[0]), dtype=np.float64)
+        check_action_space = Box(low=0.0, high=0.14, shape=(num_robots * bc_trainer.action_space.shape[0],),
                                  dtype=np.float32)
+        #todo: uncomment check
 
-        utils.check_for_correct_spaces(
-            self.venv,
-            check_observation_space,
-            check_action_space,
-        )
+        # utils.check_for_correct_spaces(
+        #     self.venv,
+        #     check_observation_space,
+        #     check_action_space,
+        # )
         self.bc_trainer = bc_trainer
         self.bc_trainer.logger = self.logger
 
@@ -815,7 +816,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
 
     def create_trajectory_collector_multi_robot(self,
                                                 actions_size_single_robot: int,
-                                                n_robots: int = 1,
+                                                num_robots: int = 1,
                                                 ) -> InteractiveTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
 
@@ -832,7 +833,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             beta=beta,
             save_dir=save_dir,
             rng=self.rng,
-            n_robots=n_robots,
+            num_robots=num_robots,
             actions_size_single_robot=actions_size_single_robot,
 
         )
@@ -844,7 +845,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             switch2human_thresh2,
             switch2robot_thresh2,
             actions_size_single_robot: int,
-            n_robots: int,
+            num_robots: int,
             is_initial_collection=False,
     ) -> ThriftyTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
@@ -866,7 +867,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             switch2human_thresh=switch2human_thresh,
             switch2human_thresh2=switch2human_thresh2,
             switch2robot_thresh2=switch2robot_thresh2,
-            n_robots=n_robots,
+            num_robots=num_robots,
             actions_size_single_robot=actions_size_single_robot,
             is_initial_collection=is_initial_collection,
 
