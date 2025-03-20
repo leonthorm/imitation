@@ -173,7 +173,8 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             save_dir: types.AnyPath,
             rng: np.random.Generator,
             num_robots: int,
-            actions_size_single_robot: int
+            actions_size_single_robot: int,
+            cable_lengths: np.ndarray,
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -203,6 +204,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self.rng = rng
         self.num_robots = num_robots
         self.actions_size_single_robot = actions_size_single_robot
+        self.cable_lengths = cable_lengths
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
         """Set the seed for the DAgger random number generator and wrapped VecEnv.
@@ -299,9 +301,9 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         # todo: split reward
         for traj_index, traj in enumerate(fresh_demos):
             for n in range(self.num_robots):
-                obs_nth_robot = traj.obs[:, n, :]
-                acts_nth_robot = traj.acts[:,
-                                 n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot]
+                obs_nth_robot = get_policy_obs(self.num_robots, n, self.cable_lengths, traj.obs)
+                acts_nth_robot = traj.acts[:,n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot
+                                 ]
                 # todo: reward and info per robot
                 traj_nth_robot = types.TrajectoryWithRew(
                     rews=traj.rews, terminal=traj.terminal, obs=obs_nth_robot, acts=acts_nth_robot, infos=traj.infos
@@ -339,6 +341,7 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             switch2robot_thresh: [np.ndarray],
             switch2robot_thresh2: [np.ndarray],
             num_robots,
+            cable_lengths: np.ndarray,
             actions_size_single_robot,
             is_initial_collection: bool = False,
 
@@ -372,6 +375,7 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self.switch2robot_thresh = switch2robot_thresh
         self.switch2robot_thresh2 = switch2robot_thresh2
         self.num_robots = num_robots
+        self.cable_lengths = cable_lengths
         self.expert_mode = [[False for _ in range(self.num_robots)] for _ in range(self.num_envs)]
         self.estimates = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
         self.estimates2 = [[[] for _ in range(self.num_robots)] for _ in range(self.num_envs)]
@@ -465,7 +469,8 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
                         # self.risk[i].append(safety)
                         # safety = policy.safety
                         if (np.sum(
-                                (robot_act - env_act[n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot]) ** 2
+                                (robot_act - env_act[n * self.actions_size_single_robot:(
+                                                                                                n + 1) * self.actions_size_single_robot]) ** 2
                         ) < self.switch2robot_thresh[env_idx][n] and
                                 (not self.q_learning or safety > self.switch2robot_thresh2[env_idx][n])):
                             print("Switch to Robot")
@@ -534,8 +539,10 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
                 if len(self.estimates[env_idx][n]) > 25:
                     target_idx = int((1 - self.target_rate) * len(self.estimates[env_idx][n]))
                     self.switch2human_thresh[env_idx][n] = sorted(self.estimates[env_idx][n])[target_idx]
-                    self.switch2human_thresh2[env_idx][n] = sorted(self.estimates2[env_idx][n], reverse=True)[target_idx]
-                    self.switch2robot_thresh2[env_idx][n] = sorted(self.estimates2[env_idx][n])[int(0.5 * len(self.estimates[env_idx][n]))]
+                    self.switch2human_thresh2[env_idx][n] = sorted(self.estimates2[env_idx][n], reverse=True)[
+                        target_idx]
+                    self.switch2robot_thresh2[env_idx][n] = sorted(self.estimates2[env_idx][n])[
+                        int(0.5 * len(self.estimates[env_idx][n]))]
 
                     # print("env: {}, robot: {}, len(estimates): {}, New switch thresholds: {} {} {}".format(
                     #     env_idx, n ,len(self.estimates[env_idx][n]),
@@ -543,8 +550,6 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
                     #     self.switch2human_thresh2[env_idx][n],
                     #     self.switch2robot_thresh2[env_idx][n])
                     # )
-
-
 
         return self.switch2human_thresh, self.switch2human_thresh2, self.switch2robot_thresh2
 
@@ -578,11 +583,13 @@ class ThriftyTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
 
         target_idx = int((1 - target_rate) * len(heldout_estimates))
         # switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.num_robots] * self.venv.num_envs
-        self.switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.num_robots for _ in range(self.num_envs)]
+        self.switch2human_thresh = [[sorted(heldout_estimates)[target_idx]] * self.num_robots for _ in
+                                    range(self.num_envs)]
         print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
         print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
         # switch2human_thresh2 = [[0.48] * self.num_robots] * self.venv.num_envs  # a priori guess: 48% discounted probability of success. Could also estimate from data
-        self.switch2human_thresh2 = [[0.48] * self.num_robots for _ in range(self.num_envs)] # a priori guess: 48% discounted probability of success. Could also estimate from data
+        self.switch2human_thresh2 = [[0.48] * self.num_robots for _ in range(
+            self.num_envs)]  # a priori guess: 48% discounted probability of success. Could also estimate from data
         # switch2robot_thresh2 = [[0.495] * self.num_robots] * self.venv.num_envs
         self.switch2robot_thresh2 = [[0.495] * self.num_robots for _ in range(self.num_envs)]
 
@@ -677,7 +684,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
                                       shape=(num_robots, bc_trainer.observation_space.shape[0]), dtype=np.float64)
         check_action_space = Box(low=0.0, high=0.14, shape=(num_robots * bc_trainer.action_space.shape[0],),
                                  dtype=np.float32)
-        #todo: uncomment check
+        # todo: uncomment check
 
         # utils.check_for_correct_spaces(
         #     self.venv,
@@ -816,7 +823,8 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
 
     def create_trajectory_collector_multi_robot(self,
                                                 actions_size_single_robot: int,
-                                                num_robots: int = 1,
+                                                num_robots: int,
+                                                cable_lengths: np.ndarray,
                                                 ) -> InteractiveTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
 
@@ -835,7 +843,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             rng=self.rng,
             num_robots=num_robots,
             actions_size_single_robot=actions_size_single_robot,
-
+            cable_lengths=cable_lengths
         )
         return collector
 
@@ -846,6 +854,8 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             switch2robot_thresh2,
             actions_size_single_robot: int,
             num_robots: int,
+            cable_lengths: np.ndarray,
+
             is_initial_collection=False,
     ) -> ThriftyTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
@@ -870,7 +880,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             num_robots=num_robots,
             actions_size_single_robot=actions_size_single_robot,
             is_initial_collection=is_initial_collection,
-
+            cable_lengths=cable_lengths
         )
         return collector
 
@@ -934,3 +944,55 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             util.save_policy(self.policy, policy_path)
 
         return checkpoint_paths[0], policy_paths[0]
+
+def get_policy_obs(num_robots, robot, cable_lengths, obs):
+    """ choose the policy input for the decentralized policy
+    The returned observation is an array (state[t], state_desired[t], payload_acc_desired[t], current_desired_action)
+
+    Arguments:
+        num_robots (int): number of robots
+        robot (int): current robot
+        obs: observation returned by the simulation environment
+    Returns:
+        obs for current robot
+    """
+    state_d_start_idx = 6 + num_robots * 13
+    payload_acc_start_idx = state_d_start_idx + 6 + num_robots * 13
+    action_d_start_idx = payload_acc_start_idx + 3
+
+    assert len(obs) == state_d_start_idx + payload_acc_start_idx + action_d_start_idx + num_robots * 4
+
+    state = obs[:state_d_start_idx]
+    state_d = obs[state_d_start_idx:payload_acc_start_idx]
+    payload_acc_d = obs[payload_acc_start_idx:action_d_start_idx]
+    action_d = obs[action_d_start_idx:]
+
+    payload_pos_e = state_d[0:3] - state[0:3]
+    payload_vel_e = state_d[3:6] - state[3:6]
+
+    cable_start_idx = 6
+
+    cable_q = state[cable_start_idx + 6 * robot:cable_start_idx + 6 * robot + 3]
+    cable_w = state[cable_start_idx + 6 * robot + 3:cable_start_idx + 6 * robot + 6]
+
+    robot_start_idx = 6 + 6 * num_robots
+
+    robot_rot = state[robot_start_idx + 7 * robot:robot_start_idx + 7 * robot + 4]
+    robot_w = state[robot_start_idx + 7 * robot + 4:robot_start_idx + 7 * robot + 7]
+
+    other_robot_pos = []
+    for n in range(num_robots):
+        if n == robot: continue
+        cq = state[cable_start_idx:cable_start_idx + 6 * n + 3]
+        positon = state_d[0:3] - cable_lengths[robot] * cq
+        other_robot_pos.append(positon)
+
+    action_d_single_robot = action_d[4 * robot:4 * robot + 4]
+    single_robot_obs = np.concatenate((payload_pos_e, payload_vel_e, cable_q, cable_w, robot_rot, robot_w, np.ravel(other_robot_pos), action_d_single_robot))
+
+    assert len(single_robot_obs) == 6 + 6 + 7 + 3 * (num_robots-1) + 4
+    return single_robot_obs
+
+
+
+
