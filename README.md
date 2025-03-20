@@ -2,7 +2,7 @@
 [![Documentation Status](https://readthedocs.org/projects/imitation/badge/?version=latest)](https://imitation.readthedocs.io/en/latest/?badge=latest)
 [![codecov](https://codecov.io/gh/HumanCompatibleAI/imitation/branch/master/graph/badge.svg)](https://codecov.io/gh/HumanCompatibleAI/imitation)
 [![PyPI version](https://badge.fury.io/py/imitation.svg)](https://badge.fury.io/py/imitation)
-test
+test revert
 # Imitation Learning Baseline Implementations
 
 This project aims to provide clean implementations of imitation and reward learning algorithms.
