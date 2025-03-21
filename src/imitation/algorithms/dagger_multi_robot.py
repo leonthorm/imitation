@@ -25,6 +25,8 @@ from imitation.data import rollout_multi_robot, serialize, types
 from imitation.util import logger as imit_logger
 from imitation.util import util
 
+from imitation.data.rollout_multi_robot import get_obs_single_robot
+
 
 class BetaSchedule(abc.ABC):
     """Computes beta (% of time demonstration action used) from training round."""
@@ -271,8 +273,11 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             # acts_nth_robot = self.get_robot_acts(self._last_obs[mask, n, :])
             # acts_conc = np.concatenate((acts_conc, acts_nth_robot), axis=1)
             #
-
-            acts_list = [self.get_robot_acts(self._last_obs[mask, n, :]) for n in range(self.num_robots)]
+            obs_per_robot = np.array([
+                [get_obs_single_robot(self.num_robots, n, self.cable_lengths, env_obs) for n in range(self.num_robots)]
+                for env_obs in self._last_obs
+            ])
+            acts_list = [self.get_robot_acts(obs_per_robot[mask, n]) for n in range(self.num_robots)]
             actual_acts[mask] = np.hstack(acts_list)
 
         self._last_user_actions = actions
@@ -301,7 +306,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         # todo: split reward
         for traj_index, traj in enumerate(fresh_demos):
             for n in range(self.num_robots):
-                obs_nth_robot = get_policy_obs(self.num_robots, n, self.cable_lengths, traj.obs)
+                obs_nth_robot = np.array([get_obs_single_robot(self.num_robots, n, self.cable_lengths, obs) for obs in traj.obs])
                 acts_nth_robot = traj.acts[:,n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot
                                  ]
                 # todo: reward and info per robot
@@ -945,52 +950,6 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
 
         return checkpoint_paths[0], policy_paths[0]
 
-def get_policy_obs(num_robots, robot, cable_lengths, obs):
-    """ choose the policy input for the decentralized policy
-    The returned observation is an array (state[t], state_desired[t], payload_acc_desired[t], current_desired_action)
-
-    Arguments:
-        num_robots (int): number of robots
-        robot (int): current robot
-        obs: observation returned by the simulation environment
-    Returns:
-        obs for current robot
-    """
-    state_d_start_idx = 6 + num_robots * 13
-    payload_acc_start_idx = state_d_start_idx + 6 + num_robots * 13
-    action_d_start_idx = payload_acc_start_idx + 3
-
-    assert len(obs) == state_d_start_idx + payload_acc_start_idx + action_d_start_idx + num_robots * 4
-
-    state = obs[:state_d_start_idx]
-    state_d = obs[state_d_start_idx:payload_acc_start_idx]
-    payload_acc_d = obs[payload_acc_start_idx:action_d_start_idx]
-    action_d = obs[action_d_start_idx:]
-    payload_pos_e = state_d[0:3] - state[0:3]
-    payload_vel_e = state_d[3:6] - state[3:6]
-
-    cable_start_idx = 6
-
-    cable_q = state[cable_start_idx + 6 * robot:cable_start_idx + 6 * robot + 3]
-    cable_w = state[cable_start_idx + 6 * robot + 3:cable_start_idx + 6 * robot + 6]
-
-    robot_start_idx = 6 + 6 * num_robots
-
-    robot_rot = state[robot_start_idx + 7 * robot:robot_start_idx + 7 * robot + 4]
-    robot_w = state[robot_start_idx + 7 * robot + 4:robot_start_idx + 7 * robot + 7]
-
-    other_robot_pos = []
-    for n in range(num_robots):
-        if n == robot: continue
-        cq = state[cable_start_idx:cable_start_idx + 6 * n + 3]
-        positon = state_d[0:3] - cable_lengths[robot] * cq
-        other_robot_pos.append(positon)
-
-    action_d_single_robot = action_d[4 * robot:4 * robot + 4]
-    single_robot_obs = np.concatenate((payload_pos_e, payload_vel_e, cable_q, cable_w, robot_rot, robot_w, np.ravel(other_robot_pos), action_d_single_robot))
-
-    assert len(single_robot_obs) == 6 + 6 + 7 + 3 * (num_robots-1) + 4
-    return single_robot_obs
 
 
 

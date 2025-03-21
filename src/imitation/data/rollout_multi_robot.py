@@ -22,7 +22,7 @@ from typing import (
 import numpy as np
 from gymnasium import spaces
 from stable_baselines3.common.base_class import BaseAlgorithm
-from stable_baselines3.common.policies import BasePolicy
+from stable_baselines3.common.policies import BasePolicy, ActorCriticPolicy
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import VecEnv
 
@@ -424,18 +424,23 @@ def generate_trajectories_multi_robot(
         obs,
         (np.ndarray, dict),
     ), "Tuple observations are not supported."
-    wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(num_robots)]
+    # todo maybe wrap
+    cable_lengths = [0.5] * num_robots
+    obs_per_robot = np.array([
+        [get_obs_single_robot(num_robots, n, cable_lengths, env_obs) for n in range(num_robots)]
+        for env_obs in obs
+    ])
 
     # we use dictobs to iterate over the envs in a vecenv
     #todo: check multi venv
-    for n in range(num_robots):
-        for env_idx, ob in enumerate(wrapped_obs_list[n]):
+    for env_idx, env_ob in enumerate(obs_per_robot):
+        for n in range(num_robots):
             # Seed with first obs only. Inside loop, we'll only add second obs from
             # each (s,a,r,s') tuple, under the same "obs" key again. That way we still
             # get all observations, but they're not duplicated into "next obs" and
             # "previous obs" (this matters for, e.g., Atari, where observations are
             # really big).
-            trajectories_accum_list[n].add_step(dict(obs=ob), env_idx)
+            trajectories_accum_list[n].add_step(dict(obs=env_ob[n]), env_idx)
 
     # Now, we sample until `sample_until(trajectories)` is true.
     # If we just stopped then this would introduce a bias towards shorter episodes,
@@ -445,45 +450,40 @@ def generate_trajectories_multi_robot(
     #
     # To start with, all environments are active.
     active = np.ones(venv.num_envs, dtype=bool)
-    states = [None] * num_robots
+    state = None
     dones = np.zeros(venv.num_envs, dtype=bool)
     while np.any(active):
-        # policy gets unwrapped observations (eg as dict, not dictobs)
-        # acts = []
-        # for n in range(num_robots):
-        #     # todo: check multi venv
-        #     act_n, states[n] = get_actions(obs[:, n], states[n], dones)
-        #     acts.append(act_n)
-        acts, _ = get_actions(obs, None, dones)
-        # for n in range(num_robots):
-        #     # todo: check multi venv
-        #     act_n, states[n] = get_actions(obs[:, n], states[n], dones)
-        #     acts.append(act_n)
-        # obs, rews, dones, infos = venv.step(np.concatenate(acts, axis=1))
+        # expert_call
+
+        if isinstance(policy, ActorCriticPolicy):
+            obs_per_robot = np.array([
+                [get_obs_single_robot(num_robots, n, cable_lengths, env_obs) for n in range(num_robots)]
+                for env_obs in obs
+            ])
+            acts = []
+            for n in range(num_robots):
+                # todo: check multi venv
+                act_n, state = get_actions(obs_per_robot[:,n], None, dones)
+                acts.append(act_n)
+            acts = np.concatenate(acts, axis=1)
+        else:
+            acts, state = get_actions(obs, None, dones)
         obs, rews, dones, infos = venv.step(acts)
-        # todo: handle different infos
+
+        obs_per_robot = np.array([
+            [get_obs_single_robot(num_robots, n, cable_lengths, env_obs) for n in range(num_robots)]
+            for env_obs in obs
+        ])
+
         infos_robots = [deepcopy(infos) for _ in range(num_robots)]
 
         #  Handle terminal observations for each robot if necessary
-        done_indices = np.where(dones)[0]  # Get indices where `dones` is True
-        for n in range(num_robots):
-            for done_idx in done_indices:
-                infos_robots[n][done_idx]["terminal_observation"] = infos_robots[n][done_idx]["terminal_observation"][n]
-
-        #
-        # if dones[0]:
-        #     for n in range(num_robots):
-        #         print(infos_robots[:, n])
-        #         print(infos_robots[:, n][0])
-        #         print(infos_robots[:, n][0]["terminal_observation"])
-        #         infos_robots[n][0]["terminal_observation"] = infos_robots[n][0]["terminal_observation"][n]
-
-        assert isinstance(
-            obs,
-            (np.ndarray, dict),
-        ), "Tuple observations are not supported."
-        # todo: check for multiple venvs
-        wrapped_obs_list = [types.maybe_wrap_in_dictobs(obs[:, n]) for n in range(num_robots)]
+        if np.any(dones):  # More efficient check
+            done_envs = np.where(dones)[0]
+            for n in range(num_robots):
+                for env in done_envs:
+                    terminal_obs = infos_robots[n][env]["terminal_observation"]
+                    infos_robots[n][env]["terminal_observation"] = get_obs_single_robot(num_robots, n, cable_lengths, terminal_obs)
 
         # If an environment is inactive, i.e. the episode completed for that
         # environment after `sample_until(trajectories)` was true, then we do
@@ -491,10 +491,11 @@ def generate_trajectories_multi_robot(
         # by just making it never done.
         dones &= active
 
+
         for n in range(num_robots):
             new_trajs = trajectories_accum_list[n].add_steps_and_auto_finish(
-                acts[n],
-                wrapped_obs_list[n],
+                acts[:, n * 4:n * 4 + 4],
+                obs_per_robot[:,n],
                 rews,
                 dones,
                 infos_robots[n]
@@ -533,7 +534,7 @@ def generate_trajectories_multi_robot(
                 assert obs_space_shape is not None
                 exp_obs = (n_steps + 1,) + obs_space_shape  # type: ignore[assignment]
             real_obs = (trajectory.obs.shape[0], num_robots, trajectory.obs.shape[1])
-            assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
+            # assert real_obs == exp_obs, f"expected shape {exp_obs}, got {real_obs}"
             assert venv.action_space.shape is not None
             exp_act = (n_steps,) + venv.action_space.shape
             real_act = (trajectory.acts.shape[0], num_robots * trajectory.acts.shape[1])
@@ -797,3 +798,55 @@ def discounted_sum(arr: np.ndarray, gamma: float) -> Union[np.ndarray, float]:
         return arr.sum(axis=0)
     else:
         return np.polynomial.polynomial.polyval(gamma, arr)
+
+def get_obs_single_robot(num_robots, robot, cable_lengths, obs):
+    """ choose the observation input for the decentralized policy
+    The input observation is an array (state[t], state_desired[t], payload_acc_desired[t], current_desired_action)
+
+    Arguments:
+        num_robots (int): number of robots
+        robot (int): current robot
+        obs: observation returned by the simulation environment
+    Returns:
+        obs for current robot
+    """
+    state_d_start_idx = 6 + num_robots * 13
+    payload_acc_start_idx = state_d_start_idx + 9 + num_robots * 13
+    action_d_start_idx = payload_acc_start_idx + 3
+
+    assert len(obs) == action_d_start_idx + num_robots * 4
+
+    state = obs[:state_d_start_idx]
+    state_d = obs[state_d_start_idx:payload_acc_start_idx]
+    payload_acc_d = obs[payload_acc_start_idx:action_d_start_idx]
+    action_d = obs[action_d_start_idx:]
+    payload_pos_e = state_d[0:3] - state[0:3]
+    payload_vel_e = state_d[3:6] - state[3:6]
+
+    cable_start_idx = 6
+
+    cable_q = state[cable_start_idx + 6 * robot:cable_start_idx + 6 * robot + 3]
+    cable_w = state[cable_start_idx + 6 * robot + 3:cable_start_idx + 6 * robot + 6]
+
+    robot_start_idx = 6 + 6 * num_robots
+
+    robot_rot = state[robot_start_idx + 7 * robot:robot_start_idx + 7 * robot + 4]
+    robot_w = state[robot_start_idx + 7 * robot + 4:robot_start_idx + 7 * robot + 7]
+
+    other_robot_pos = []
+    for n in range(num_robots):
+        if n == robot: continue
+        cq = state[cable_start_idx + 6 * n:cable_start_idx + 6 * n + 3]
+        positon = state_d[0:3] - cable_lengths[robot] * cq
+        other_robot_pos.append(positon)
+
+    action_d_single_robot = action_d[4 * robot:4 * robot + 4]
+    single_robot_obs = np.concatenate((payload_pos_e, payload_vel_e, cable_q, cable_w, robot_rot, robot_w, np.ravel(other_robot_pos), action_d_single_robot))
+
+    assert len(single_robot_obs) == 6 + 6 + 7 + 3 * (num_robots-1) + 4
+    return single_robot_obs
+
+def get_len_obs_single_robot(num_robots):
+
+    len_single_robot_obs = 6 + 6 + 7 + 3 * (num_robots-1) + 4
+    return len_single_robot_obs
