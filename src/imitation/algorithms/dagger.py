@@ -197,6 +197,8 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         self._last_user_actions = None
         self.rng = rng
 
+        self.is_robot_act = np.full(self.venv.num_envs, False)
+
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
         """Set the seed for the DAgger random number generator and wrapped VecEnv.
 
@@ -227,6 +229,7 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         self._last_obs = obs
         self._is_reset = True
         self._last_user_actions = None
+        self.time_step = 0
         return obs
 
     def step_async(self, actions: np.ndarray) -> None:
@@ -254,10 +257,12 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         # Replace each given action with a robot action 100*(1-beta)% of the time.
         actual_acts = np.array(actions)
 
+        self.is_robot_act[:] = False
         mask = self.rng.uniform(0, 1, size=(self.num_envs,)) > self.beta
         if np.sum(mask) != 0:
             actual_acts[mask] = self.get_robot_acts(self._last_obs[mask])
-
+            self.is_robot_act[mask] = True
+        self.time_step += 1
         self._last_user_actions = actions
         self.venv.step_async(actual_acts)
 
@@ -274,6 +279,11 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         assert self.traj_accum is not None
         assert self._last_user_actions is not None
         self._last_obs = next_obs
+        for env_idx, is_robot_act in enumerate(self.is_robot_act):
+            if is_robot_act:
+                print(is_robot_act)
+            infos[env_idx]["is_robot_act"] = is_robot_act
+
         fresh_demos = self.traj_accum.add_steps_and_auto_finish(
             obs=next_obs,
             acts=self._last_user_actions,
@@ -344,9 +354,9 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
         self.switch2human_thresh2 = switch2human_thresh2
         self.switch2robot_thresh = switch2robot_thresh
         self.switch2robot_thresh2 = switch2robot_thresh2
-        self.expert_mode = [False] * self.venv.num_envs
-        self.estimates = [[]] * self.venv.num_envs
-        self.estimates2 = [[]] * self.venv.num_envs
+        self.expert_mode = [False for _ in range(self.venv.num_envs)]
+        self.estimates = [[] for _ in range(self.venv.num_envs) ]
+        self.estimates2 = [[] for _ in range(self.venv.num_envs)]
         self.target_rate = 0.01
         self.q_learning = False
         self.num_switch_to_robot = 0
@@ -354,6 +364,7 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
         self.num_switch_to_human2 = 0
         self.online_burden = 0
 
+        self.store_in_qbuffer = False
         # for _ in self.venv.envs:
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
@@ -386,6 +397,11 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
         self._last_obs = obs
         self._is_reset = True
         self._last_user_actions = None
+
+        self.store_in_qbuffer = False
+        self.expert_mode = [False for _ in range(self.venv.num_envs)]
+
+
         return obs
 
     def step_async(self, actions: np.ndarray) -> None:
@@ -410,44 +426,46 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
         assert self._is_reset, "call .reset() before .step()"
         assert self._last_obs is not None
 
-        # Replace each given action with a robot action 100*(1-beta)% of the time.
+        # actual_acts is actions by expert
         actual_acts = np.array(actions)
         # TODO: get variance per env predict
         # TODO: q learning if ensemble
 
         if not self.is_initial_collection:
-            for i, act in enumerate(actual_acts):
-                print('expert mode:', self.expert_mode[i])
-                robot_act = self.get_robot_acts(self._last_obs[i])
+            for env_idx, env_act in enumerate(actual_acts):
+                print('expert mode:', self.expert_mode[env_idx])
+
                 safety = 0
                 # safety = ac.safety(o,a)
                 variance = self.variance()
-                if not self.expert_mode[i]:
-                    self.estimates[i].append(self.variance())
+                if not self.expert_mode[env_idx]:
+                    robot_act = self.get_robot_acts(self._last_obs[env_idx])
+                    self.estimates[env_idx].append(self.variance())
                     # TODO : add safety
                     # self.estimates2[i].append(policy.safety())
-                    self.estimates2[i].append(0)
-                    actual_acts[i] = robot_act
-                if self.expert_mode[i]:
+                    self.estimates2[env_idx].append(0)
+                    actual_acts[env_idx] = robot_act
+                if self.expert_mode[env_idx]:
                     self.online_burden += 1
 
                     # self.risk[i].append(safety)
                     # safety = policy.safety
-                    if np.sum((robot_act - act) ** 2) < self.switch2robot_thresh[i] and (
-                            not self.q_learning or safety > self.switch2robot_thresh2[i]):
+                    if np.sum((robot_act - env_act) ** 2) < self.switch2robot_thresh[env_idx] and (
+                            not self.q_learning or safety > self.switch2robot_thresh2[env_idx]):
                         print("Switch to Robot")
-                        self.expert_mode[i] = False
+                        self.expert_mode[env_idx] = False
                         self.num_switch_to_robot += 1
+                    self.expert_mode = True
                 # TODO: change to > whith proper variance
-                elif self.variance() >= self.switch2human_thresh[i]:
+                elif self.variance() >= self.switch2human_thresh[env_idx]:
                     print("Switch to Human (Novel)")
                     self.num_switch_to_human += 1
-                    self.expert_mode[i] = True
+                    self.expert_mode[env_idx] = True
                     continue
-                elif self.q_learning and safety < self.switch2human_thresh2[i]:
+                elif self.q_learning and safety < self.switch2human_thresh2[env_idx]:
                     print("Switch to Human (Risk)")
                     self.num_switch_to_human2 += 1
-                    self.expert_mode[i] = True
+                    self.expert_mode[env_idx] = True
                     continue
                 else:
                     # self.risk[i].append(safety)
@@ -476,7 +494,10 @@ class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
             infos=infos,
             dones=dones,
         )
+
         for traj_index, traj in enumerate(fresh_demos):
+            print(len(fresh_demos))
+            print('traj idx: ', traj_index)
             _save_dagger_demo(traj, traj_index, self.save_dir, self.rng)
 
         return next_obs, rews, dones, infos
