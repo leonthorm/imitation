@@ -11,18 +11,17 @@ import logging
 import os
 import pathlib
 import uuid
-from typing import Any, Callable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, List, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import torch as th
-from stable_baselines3.common import policies, utils, vec_env
-from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
-from torch.utils import data as th_data
-
-from imitation.algorithms import base, bc
+from imitation.algorithms import base, ensemble_trainer
 from imitation.data import rollout, serialize, types
 from imitation.util import logger as imit_logger
 from imitation.util import util
+from stable_baselines3.common import policies, utils, vec_env
+from stable_baselines3.common.vec_env.base_vec_env import VecEnvStepReturn
+from torch.utils import data as th_data
 
 
 class BetaSchedule(abc.ABC):
@@ -148,13 +147,13 @@ def _save_dagger_demo(
     logging.info(f"Saved demo at '{npz_path}'")
 
 
-class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
+
+class ThriftyTrajectoryCollector(vec_env.VecEnvWrapper):
     """DAgger VecEnvWrapper for querying and saving expert actions.
 
-    Every call to `.step(actions)` accepts and saves expert actions to `self.save_dir`,
-    but only forwards expert actions to the wrapped VecEnv with probability
-    `self.beta`. With probability `1 - self.beta`, a "robot" action (i.e
-    an action from the imitation policy) is forwarded instead.
+    This wrapper conditionally forwards expert or robot actions based on
+    variance and safety thresholds. At the end of each episode, the trajectory
+    is saved as a `TrajectoryWithRew` to `save_dir`
 
     Demonstrations are saved as `TrajectoryWithRew` to `self.save_dir` at the end
     of every episode.
@@ -168,9 +167,15 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
             self,
             venv: vec_env.VecEnv,
             get_robot_acts: Callable[[np.ndarray], np.ndarray],
-            beta: float,
+            get_variance: Callable[[np.ndarray], float],
+            get_safety: Callable[[np.ndarray, np.ndarray], float],
             save_dir: types.AnyPath,
             rng: np.random.Generator,
+            switch2human_thresh: [np.ndarray],
+            switch2human_thresh2: [np.ndarray],
+            switch2robot_thresh: [np.ndarray],
+            switch2robot_thresh2: [np.ndarray],
+            is_initial_collection: bool = False,
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -179,16 +184,13 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
             get_robot_acts: get robot actions that can be substituted for
                 human actions. Takes a vector of observations as input & returns a
                 vector of actions.
-            beta: fraction of the time to use action given to .step() instead of
-                robot action. The choice of robot or human action is independently
-                randomized for each individual `Env` at every timestep.
             save_dir: directory to save collected trajectories in.
             rng: random state for random number generation.
         """
         super().__init__(venv)
         self.get_robot_acts = get_robot_acts
-        assert 0 <= beta <= 1
-        self.beta = beta
+        self.get_variance = get_variance
+        self.get_safety = get_safety
         self.traj_accum = None
         self.save_dir = save_dir
         self._last_obs = None
@@ -197,7 +199,29 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         self._last_user_actions = None
         self.rng = rng
 
-        self.is_robot_act = np.full(self.venv.num_envs, False)
+        self.is_initial_collection = is_initial_collection
+
+        self.switch2human_thresh = switch2human_thresh
+        self.switch2human_thresh2 = switch2human_thresh2
+        self.switch2robot_thresh = switch2robot_thresh
+        self.switch2robot_thresh2 = switch2robot_thresh2
+
+        self.expert_mode = np.full((self.venv.num_envs,), False)
+        self.estimates = [[] for _ in range(self.venv.num_envs)]
+        self.estimates2 = [[] for _ in range(self.venv.num_envs)]
+        self.risk = [[] for _ in range(self.venv.num_envs)]
+
+        self.target_rate = 0.01
+        self.q_learning = False
+        self.num_switch_to_robot = 0
+        self.num_switch_to_human = 0
+        self.num_switch_to_human2 = 0
+        self.online_burden = 0
+
+        self.robot_rollout = False
+
+        self.is_robot_act = np.full((self.venv.num_envs,), True)
+        # for _ in self.venv.envs:
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
         """Set the seed for the DAgger random number generator and wrapped VecEnv.
@@ -229,7 +253,11 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         self._last_obs = obs
         self._is_reset = True
         self._last_user_actions = None
-        self.time_step = 0
+
+        self.is_robot_act = np.full((self.venv.num_envs,), False)
+        self.expert_mode = np.full((self.venv.num_envs,), False)
+        # self.risk = [[] for _ in range(self.venv.num_envs)]
+
         return obs
 
     def step_async(self, actions: np.ndarray) -> None:
@@ -254,15 +282,54 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         assert self._is_reset, "call .reset() before .step()"
         assert self._last_obs is not None
 
-        # Replace each given action with a robot action 100*(1-beta)% of the time.
+        # actions by expert
         actual_acts = np.array(actions)
 
-        self.is_robot_act[:] = False
-        mask = self.rng.uniform(0, 1, size=(self.num_envs,)) > self.beta
-        if np.sum(mask) != 0:
-            actual_acts[mask] = self.get_robot_acts(self._last_obs[mask])
-            self.is_robot_act[mask] = True
-        self.time_step += 1
+        if not self.is_initial_collection and not self.robot_rollout:
+            for env_idx, env_act in enumerate(actual_acts):
+                print('expert mode:', self.expert_mode[env_idx])
+
+                variance = self.get_variance(self._last_obs[env_idx])
+                robot_act = self.get_robot_acts(self._last_obs[env_idx])
+                if not self.expert_mode[env_idx]:
+
+                    safety = self.get_safety(self._last_obs[env_idx], robot_act)
+
+                    self.estimates[env_idx].append(variance)
+                    self.estimates2[env_idx].append(safety)
+                    actual_acts[env_idx] = robot_act
+
+                    self.is_robot_act[env_idx] = True
+                if self.expert_mode[env_idx]:
+                    safety = self.get_safety(self._last_obs[env_idx], actual_acts[env_idx])
+
+                    self.online_burden += 1
+
+                    # self.risk[env_idx].append(safety)
+                    if np.sum((robot_act - env_act) ** 2) < self.switch2robot_thresh[env_idx] and (
+                            not self.q_learning or safety > self.switch2robot_thresh2[env_idx]):
+                        print("Switch to Robot")
+                        self.expert_mode[env_idx] = False
+                        self.num_switch_to_robot += 1
+
+                    self.is_robot_act[env_idx] = False
+                elif variance >= self.switch2human_thresh[env_idx]:
+                    print("Switch to Human (Novel)")
+                    self.num_switch_to_human += 1
+                    self.expert_mode[env_idx] = True
+                    continue
+                elif self.q_learning and self.get_safety(self._last_obs[env_idx], robot_act) < self.switch2human_thresh2[env_idx]:
+                    print("Switch to Human (Risk)")
+                    self.num_switch_to_human2 += 1
+                    self.expert_mode[env_idx] = True
+                    continue
+                # may use risk for logging
+                # else:
+                # self.risk[env_idx].append(self.get_safety(self._last_obs[env_idx], robot_act))
+        elif self.robot_rollout:
+            actual_acts[:] = self.get_robot_acts(self._last_obs[:])
+            self.is_robot_act[:] = True
+
         self._last_user_actions = actions
         self.venv.step_async(actual_acts)
 
@@ -281,7 +348,6 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
         self._last_obs = next_obs
         for env_idx, is_robot_act in enumerate(self.is_robot_act):
             infos[env_idx]["is_robot_act"] = is_robot_act
-
         fresh_demos = self.traj_accum.add_steps_and_auto_finish(
             obs=next_obs,
             acts=self._last_user_actions,
@@ -289,18 +355,76 @@ class InteractiveTrajectoryCollector(vec_env.VecEnvWrapper):
             infos=infos,
             dones=dones,
         )
+
         for traj_index, traj in enumerate(fresh_demos):
+            print(len(fresh_demos))
+            print('traj idx: ', traj_index)
             _save_dagger_demo(traj, traj_index, self.save_dir, self.rng)
 
         return next_obs, rews, dones, infos
+
+    def recompute_thresholds(self):
+        switch2human_thresh = []
+        switch2human_thresh2 = []
+        switch2robot_thresh2 = []
+        for i in range(self.venv.num_envs):
+            if len(self.estimates[i]) > 25:
+                target_idx = int((1 - self.target_rate) * len(self.estimates[i]))
+                switch2human_thresh.append(sorted(self.estimates[i])[target_idx])
+                switch2human_thresh2.append(sorted(self.estimates2[i], reverse=True)[target_idx])
+                switch2robot_thresh2.append(sorted(self.estimates2[i])[int(0.5 * len(self.estimates[i]))])
+                print("len(estimates): {}, New switch thresholds: {} {} {}".format(len(self.estimates[i]),
+                                                                                   switch2human_thresh[i],
+                                                                                   switch2human_thresh2[i],
+                                                                                   switch2robot_thresh2)[i])
+
+        return switch2human_thresh, switch2human_thresh2, switch2robot_thresh2
+
+    def estimate_switch_parameters(
+            self,
+            data,
+            target_rate=0.01
+    ):
+        """estimate switch-back parameter and initial switch-to parameter from data
+
+        Returns:
+            None.
+        """
+        num_envs = self.venv.num_envs
+        discrepancies, estimates = [], []
+        heldout_thresh = int(0.9 * data.acts.shape[0])
+        for i in range(0, heldout_thresh):
+            obs = data.obs[i]
+            a_pred = self.get_robot_acts(obs)
+            a_sup = data.acts[i]
+            discrepancies.append(np.sum((a_pred - a_sup) ** 2))
+            # TODO append variance for ensemble (policy.variance(obs))
+            estimates.append(self.get_variance(obs))
+        heldout_discrepancies, heldout_estimates = [], []
+        for i in range(heldout_thresh, data.acts.shape[0]):
+            obs = data.obs[i]
+            a_pred = self.get_robot_acts(obs)
+            a_sup = data.acts[i]
+            heldout_discrepancies.append(np.sum((a_pred - a_sup) ** 2))
+
+            heldout_estimates.append(self.get_variance(obs))
+        switch2robot_thresh = np.full(num_envs, np.array(discrepancies).mean())
+        target_idx = int((1 - target_rate) * len(heldout_estimates))
+        switch2human_thresh = np.full(num_envs, sorted(heldout_estimates)[target_idx])
+        print("Estimated switch-back threshold: {}".format(self.switch2robot_thresh))
+        print("Estimated switch-to threshold: {}".format(self.switch2human_thresh))
+        switch2human_thresh2 = np.full(num_envs, 0.48) # a priori guess: 48% discounted probability of success. Could also estimate from data
+        switch2robot_thresh2 = np.full(num_envs, 0.495)
+
+        return switch2robot_thresh, switch2human_thresh, switch2human_thresh2, switch2robot_thresh2
 
 
 class NeedsDemosException(Exception):
     """Signals demos need to be collected for current round before continuing."""
 
 
-class DAggerTrainer(base.BaseImitationAlgorithm):
-    """DAgger training class with low-level API suitable for interactive human feedback.
+class ThriftyDAggerTrainer(base.BaseImitationAlgorithm):
+    """Thrifty DAgger training class with low-level API suitable for interactive human feedback.
 
     In essence, this is just BC with some helpers for incrementally
     resuming training and interpolating between demonstrator/learnt policies.
@@ -341,7 +465,7 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             scratch_dir: types.AnyPath,
             rng: np.random.Generator,
             beta_schedule: Optional[Callable[[int], float]] = None,
-            bc_trainer: bc.BC,
+            ensemble_trainer: ensemble_trainer.EnsembleBC,
             custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
     ):
         """Builds DAggerTrainer.
@@ -354,7 +478,7 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             beta_schedule: Provides a value of `beta` (the probability of taking
                 expert action in any given state) at each round of training. If
                 `None`, then `linear_beta_schedule` will be used instead.
-            bc_trainer: A `BC` instance used to train the underlying policy.
+            ensemble_trainer: A `BC` instance used to train the underlying policy.
             custom_logger: Where to log to; if None (default), creates a new logger.
         """
         super().__init__(custom_logger=custom_logger)
@@ -371,11 +495,11 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
 
         utils.check_for_correct_spaces(
             self.venv,
-            bc_trainer.observation_space,
-            bc_trainer.action_space,
+            ensemble_trainer.observation_space,
+            ensemble_trainer.action_space,
         )
-        self.bc_trainer = bc_trainer
-        self.bc_trainer.logger = self.logger
+        self.ensemble_trainer = ensemble_trainer
+        self.ensemble_trainer.logger = self.logger
 
     def __getstate__(self):
         """Return state excluding non-pickleable objects."""
@@ -393,15 +517,15 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
     def logger(self, value: imit_logger.HierarchicalLogger) -> None:
         # DAgger and inner-BC logger should stay in sync
         self._logger = value
-        self.bc_trainer.logger = value
+        self.ensemble_trainer.logger = value
 
     @property
     def policy(self) -> policies.BasePolicy:
-        return self.bc_trainer.policy
+        return self.ensemble_trainer.policy
 
     @property
     def batch_size(self) -> int:
-        return self.bc_trainer.batch_size
+        return self.ensemble_trainer.batch_size
 
     def _load_all_demos(self) -> Tuple[types.Transitions, List[int]]:
         num_demos_by_round = []
@@ -428,8 +552,8 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             round_num = self.round_num
         return self.scratch_dir / "demos" / f"round-{round_num:03d}"
 
-    def _try_load_demos(self) -> None:
-        """Load the dataset for this round into self.bc_trainer as a DataLoader."""
+    def _try_load_demos(self, set_q_demonstrations = False) -> None:
+        """Load the dataset for this round into self.ensemble_trainer as a DataLoader."""
         demo_dir = self._demo_dir_path_for_round()
         demo_paths = self._get_demo_paths(demo_dir) if demo_dir.is_dir() else []
         if len(demo_paths) == 0:
@@ -457,7 +581,10 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
                 shuffle=True,
                 collate_fn=types.transitions_collate_fn,
             )
-            self.bc_trainer.set_demonstrations(data_loader)
+            if set_q_demonstrations:
+                self.ensemble_trainer.set_q_demonstrations(data_loader)
+            else:
+                self.ensemble_trainer.set_demonstrations(data_loader)
             self._last_loaded_round = self.round_num
 
     def extend_and_update(
@@ -499,12 +626,66 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         logging.info("Loading demonstrations")
         self._try_load_demos()
         logging.info(f"Training at round {self.round_num}")
-        self.bc_trainer.train(**bc_train_kwargs)
+        self.ensemble_trainer.train(**bc_train_kwargs)
         self.round_num += 1
         logging.info(f"New round number is {self.round_num}")
         return self.round_num
 
-    def create_trajectory_collector(self) -> InteractiveTrajectoryCollector:
+
+    def extend_and_update_qrisk(
+            self,
+            bc_train_kwargs: Optional[Mapping[str, Any]] = None,
+    ) -> int:
+        """Extend internal batch of data and train BC.
+
+        Specifically, this method will load new transitions (if necessary), train
+        the model for a while, and advance the round counter. If there are no fresh
+        demonstrations in the demonstration directory for the current round, then
+        this will raise a `NeedsDemosException` instead of training or advancing
+        the round counter. In that case, the user should call
+        `.create_trajectory_collector()` and use the returned
+        `InteractiveTrajectoryCollector` to produce a new set of demonstrations for
+        the current interaction round.
+
+        Arguments:
+            bc_train_kwargs: Keyword arguments for calling `BC.train()`. If
+                the `log_rollouts_venv` key is not provided, then it is set to
+                `self.venv` by default. If neither of the `n_epochs` and `n_batches`
+                keys are provided, then `n_epochs` is set to `self.DEFAULT_N_EPOCHS`.
+
+        Returns:
+            New round number after advancing the round counter.
+        """
+        #todo do with n_batches (from thrifty)
+        if bc_train_kwargs is None:
+            bc_train_kwargs = {}
+        else:
+            bc_train_kwargs = dict(bc_train_kwargs)
+
+        user_keys = bc_train_kwargs.keys()
+        if "log_rollouts_venv" not in user_keys:
+            bc_train_kwargs["log_rollouts_venv"] = self.venv
+
+        if "n_epochs" not in user_keys and "n_batches" not in user_keys:
+            bc_train_kwargs["n_epochs"] = 1
+
+        logging.info("Loading policy demonstrations")
+        self._try_load_demos(set_q_demonstrations=True)
+        logging.info(f"Training qrisk at round {self.round_num}")
+        self.ensemble_trainer.train_qrisk(**bc_train_kwargs)
+        self.round_num += 1
+        logging.info(f"New round number is {self.round_num}")
+        return self.round_num
+
+
+
+    def create_thrifty_trajectory_collector(
+            self, switch2robot_thresh,
+            switch2human_thresh,
+            switch2human_thresh2,
+            switch2robot_thresh2,
+            is_initial_collection=False
+    ) -> ThriftyTrajectoryCollector:
         """Create trajectory collector to extend current round's demonstration set.
 
         Returns:
@@ -513,17 +694,19 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             `InteractiveTrajectoryCollector` to see how to use this.
         """
         save_dir = self._demo_dir_path_for_round()
-        beta = self.beta_schedule(self.round_num)
-        collector = InteractiveTrajectoryCollector(
+
+        collector = ThriftyTrajectoryCollector(
             venv=self.venv,
-            get_robot_acts=lambda acts: self.bc_trainer.policy.predict(acts)[0],
-            beta=beta,
+            get_robot_acts=lambda acts: self.ensemble_trainer.policy.predict(acts)[0],
+            get_variance=lambda obs: self.ensemble_trainer.policy.variance(obs),
+            get_safety=lambda obs, act: self.ensemble_trainer.policy.safety(obs, act),
             save_dir=save_dir,
             rng=self.rng,
+            switch2robot_thresh=switch2robot_thresh, switch2human_thresh=switch2human_thresh,
+            switch2human_thresh2=switch2human_thresh2, switch2robot_thresh2=switch2robot_thresh2,
+            is_initial_collection=is_initial_collection
         )
         return collector
-
-
 
     def save_trainer(self) -> Tuple[pathlib.Path, pathlib.Path]:
         """Create a snapshot of trainer in the scratch/working directory.
@@ -559,146 +742,3 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         return checkpoint_paths[0], policy_paths[0]
 
 
-class SimpleDAggerTrainer(DAggerTrainer):
-    """Simpler subclass of DAggerTrainer for training with synthetic feedback."""
-
-    def __init__(
-            self,
-            *,
-            venv: vec_env.VecEnv,
-            scratch_dir: types.AnyPath,
-            expert_policy: policies.BasePolicy,
-            rng: np.random.Generator,
-            expert_trajs: Optional[Sequence[types.Trajectory]] = None,
-            **dagger_trainer_kwargs,
-    ):
-        """Builds SimpleDAggerTrainer.
-
-        Args:
-            venv: Vectorized training environment. Note that when the robot
-                action is randomly injected (in accordance with `beta_schedule`
-                argument), every individual environment will get a robot action
-                simultaneously for that timestep.
-            scratch_dir: Directory to use to store intermediate training
-                information (e.g. for resuming training).
-            expert_policy: The expert policy used to generate synthetic demonstrations.
-            rng: Random state to use for the random number generator.
-            expert_trajs: Optional starting dataset that is inserted into the round 0
-                dataset.
-            dagger_trainer_kwargs: Other keyword arguments passed to the
-                superclass initializer `DAggerTrainer.__init__`.
-
-        Raises:
-            ValueError: The observation or action space does not match between
-                `venv` and `expert_policy`.
-        """
-        super().__init__(
-            venv=venv,
-            scratch_dir=scratch_dir,
-            rng=rng,
-            **dagger_trainer_kwargs,
-        )
-        self.expert_policy = expert_policy
-        if expert_policy.observation_space != self.venv.observation_space:
-            raise ValueError(
-                "Mismatched observation space between expert_policy and venv",
-            )
-        if expert_policy.action_space != self.venv.action_space:
-            raise ValueError("Mismatched action space between expert_policy and venv")
-
-        # TODO(shwang):
-        #   Might welcome Transitions and DataLoaders as sources of expert data
-        #   in the future too, but this will require some refactoring, so for
-        #   now we just have `expert_trajs`.
-        if expert_trajs is not None:
-            # Save each initial expert trajectory into the "round 0" demonstration
-            # data directory.
-            for traj_index, traj in enumerate(expert_trajs):
-                _save_dagger_demo(
-                    traj,
-                    traj_index,
-                    self._demo_dir_path_for_round(),
-                    self.rng,
-                    prefix="initial_data",
-                )
-
-    def train(
-            self,
-            total_timesteps: int,
-            *,
-            rollout_round_min_episodes: int = 3,
-            rollout_round_min_timesteps: int = 500,
-            bc_train_kwargs: Optional[dict] = None,
-    ) -> None:
-        """Train the DAgger agent.
-
-        The agent is trained in "rounds" where each round consists of a dataset
-        aggregation step followed by BC update step.
-
-        During a dataset aggregation step, `self.expert_policy` is used to perform
-        rollouts in the environment but there is a `1 - beta` chance (beta is
-        determined from the round number and `self.beta_schedule`) that the DAgger
-        agent's action is used instead. Regardless of whether the DAgger agent's action
-        is used during the rollout, the expert action and corresponding observation are
-        always appended to the dataset. The number of environment steps in the
-        dataset aggregation stage is determined by the `rollout_round_min*` arguments.
-
-        During a BC update step, `BC.train()` is called to update the DAgger agent on
-        all data collected so far.
-
-        Args:
-            total_timesteps: The number of timesteps to train inside the environment.
-                In practice this is a lower bound, because the number of timesteps is
-                rounded up to finish the minimum number of episodes or timesteps in the
-                last DAgger training round, and the environment timesteps are executed
-                in multiples of `self.venv.num_envs`.
-            rollout_round_min_episodes: The number of episodes the must be completed
-                completed before a dataset aggregation step ends.
-            rollout_round_min_timesteps: The number of environment timesteps that must
-                be completed before a dataset aggregation step ends. Also, that any
-                round will always train for at least `self.batch_size` timesteps,
-                because otherwise BC could fail to receive any batches.
-            bc_train_kwargs: Keyword arguments for calling `BC.train()`. If
-                the `log_rollouts_venv` key is not provided, then it is set to
-                `self.venv` by default. If neither of the `n_epochs` and `n_batches`
-                keys are provided, then `n_epochs` is set to `self.DEFAULT_N_EPOCHS`.
-        """
-        total_timestep_count = 0
-        round_num = 0
-
-        while total_timestep_count < total_timesteps:
-            collector = self.create_trajectory_collector()
-            round_episode_count = 0
-            round_timestep_count = 0
-
-            sample_until = rollout.make_sample_until(
-                min_timesteps=max(rollout_round_min_timesteps, self.batch_size),
-                min_episodes=rollout_round_min_episodes,
-            )
-
-            trajectories = rollout.generate_trajectories(
-                policy=self.expert_policy,
-                venv=collector,
-                sample_until=sample_until,
-                deterministic_policy=True,
-                rng=collector.rng,
-            )
-
-            for traj in trajectories:
-                self._logger.record_mean(
-                    "dagger/mean_episode_reward",
-                    np.sum(traj.rews),
-                )
-                round_timestep_count += len(traj)
-                total_timestep_count += len(traj)
-
-            round_episode_count += len(trajectories)
-
-            self._logger.record("dagger/total_timesteps", total_timestep_count)
-            self._logger.record("dagger/round_num", round_num)
-            self._logger.record("dagger/round_episode_count", round_episode_count)
-            self._logger.record("dagger/round_timestep_count", round_timestep_count)
-
-            # `logger.dump` is called inside BC.train within the following fn call:
-            self.extend_and_update(bc_train_kwargs)
-            round_num += 1
