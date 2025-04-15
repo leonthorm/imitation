@@ -824,29 +824,46 @@ def get_obs_single_robot(num_robots, robot, cable_lengths, obs):
     payload_vel_e = state_d[3:6] - state[3:6]
 
     cable_start_idx = 6
+    cable_d_start_idx = 9
 
     cable_q = state[cable_start_idx + 6 * robot:cable_start_idx + 6 * robot + 3]
+    cable_q_d = state_d[cable_d_start_idx + 6 * robot:cable_d_start_idx + 6 * robot + 3]
+
     cable_w = state[cable_start_idx + 6 * robot + 3:cable_start_idx + 6 * robot + 6]
+    cable_w_d = state_d[cable_d_start_idx + 6 * robot + 3:cable_d_start_idx + 6 * robot + 6]
 
     robot_start_idx = 6 + 6 * num_robots
+    robot_d_start_idx = 9 + 6 * num_robots
 
     robot_rot = state[robot_start_idx + 7 * robot:robot_start_idx + 7 * robot + 4]
-    robot_w = state[robot_start_idx + 7 * robot + 4:robot_start_idx + 7 * robot + 7]
+    robot_rot_d = state_d[robot_d_start_idx + 7 * robot:robot_d_start_idx + 7 * robot + 4]
 
-    other_robot_pos = []
+    robot_w = state[robot_start_idx + 7 * robot + 4:robot_start_idx + 7 * robot + 7]
+    robot_w_d = state_d[robot_d_start_idx + 7 * robot + 4:robot_d_start_idx + 7 * robot + 7]
+
+    other_cable_q = []
+    other_robot_rot = []
     for n in range(num_robots):
         if n == robot: continue
         cq = state[cable_start_idx + 6 * n:cable_start_idx + 6 * n + 3]
-        positon = state_d[0:3] - cable_lengths[robot] * cq
-        other_robot_pos.append(positon)
+        # positon = state[0:3] - cable_lengths[robot] * cq
+        other_cable_q.append(cq)
+        rr = state[robot_start_idx + 7 * n:robot_start_idx + 7 * n + 4]
+        other_robot_rot.append(robot_rot)
 
     action_d_single_robot = action_d[4 * robot:4 * robot + 4]
-    single_robot_obs = np.concatenate((payload_pos_e, payload_vel_e, cable_q, cable_w, robot_rot, robot_w, np.ravel(other_robot_pos), action_d_single_robot))
+    single_robot_obs = np.concatenate((
+        payload_pos_e, payload_vel_e,
+        cable_q, cable_q_d, cable_w, cable_w_d,
+        robot_rot, robot_rot_d, robot_w, robot_w_d,
+        np.ravel(other_cable_q), np.ravel(other_robot_rot),
+        action_d_single_robot
+    ))
 
-    assert len(single_robot_obs) == 6 + 6 + 7 + 3 * (num_robots-1) + 4
+    assert len(single_robot_obs) == 6 + 12 + 14 + 7 * (num_robots-1) + 4
     return single_robot_obs
 
 def get_len_obs_single_robot(num_robots):
 
-    len_single_robot_obs = 6 + 6 + 7 + 3 * (num_robots-1) + 4
+    len_single_robot_obs = 6 + 12 + 14 + 7 * (num_robots-1) + 4
     return len_single_robot_obs
