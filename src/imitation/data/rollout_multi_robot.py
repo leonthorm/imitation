@@ -866,4 +866,5 @@ def get_obs_single_robot(num_robots, robot, cable_lengths, obs):
 def get_len_obs_single_robot(num_robots):
 
     len_single_robot_obs = 6 + 12 + 14 + 7 * (num_robots-1) + 4
+
     return len_single_robot_obs
