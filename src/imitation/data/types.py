@@ -560,7 +560,7 @@ class TransitionsMinimal(th_data.Dataset, Sequence[Mapping[str, np.ndarray]]):
         d = dataclass_quick_asdict(self)
         d_item = {k: v[key] for k, v in d.items()}
 
-        if isinstance(key, slice):
+        if isinstance(key, (slice, list, np.ndarray)):
             # Return type is the same as this dataclass. Replace field value with
             # slices.
             return dataclasses.replace(self, **d_item)
