@@ -71,9 +71,9 @@ class TrajectoryAccumulator:
         self.partial_trajectories = collections.defaultdict(list)
 
     def add_step(
-        self,
-        step_dict: Mapping[str, Union[types.Observation, Mapping[str, Any]]],
-        key: Hashable = None,
+            self,
+            step_dict: Mapping[str, Union[types.Observation, Mapping[str, Any]]],
+            key: Hashable = None,
     ) -> None:
         """Add a single step to the partial trajectory identified by `key`.
 
@@ -90,9 +90,9 @@ class TrajectoryAccumulator:
         self.partial_trajectories[key].append(step_dict)
 
     def finish_trajectory(
-        self,
-        key: Hashable,
-        terminal: bool,
+            self,
+            key: Hashable,
+            terminal: bool,
     ) -> types.TrajectoryWithRew:
         """Complete the trajectory labelled with `key`.
 
@@ -120,12 +120,12 @@ class TrajectoryAccumulator:
         return traj
 
     def add_steps_and_auto_finish(
-        self,
-        acts: np.ndarray,
-        obs: Union[types.Observation, Dict[str, np.ndarray]],
-        rews: np.ndarray,
-        dones: np.ndarray,
-        infos: List[dict],
+            self,
+            acts: np.ndarray,
+            obs: Union[types.Observation, Dict[str, np.ndarray]],
+            rews: np.ndarray,
+            dones: np.ndarray,
+            infos: List[dict],
     ) -> List[types.TrajectoryWithRew]:
         """Calls `add_step` repeatedly using acts and the returns from `venv.step`.
 
@@ -226,8 +226,8 @@ def make_min_timesteps(n: int) -> GenTrajTerminationFn:
 
 
 def make_sample_until(
-    min_timesteps: Optional[int] = None,
-    min_episodes: Optional[int] = None,
+        min_timesteps: Optional[int] = None,
+        min_episodes: Optional[int] = None,
 ) -> GenTrajTerminationFn:
     """Returns a termination condition sampling for a number of timesteps and episodes.
 
@@ -288,18 +288,18 @@ AnyPolicy = Union[BaseAlgorithm, BasePolicy, PolicyCallable, None]
 
 
 def policy_to_callable(
-    policy: AnyPolicy,
-    venv: VecEnv,
-    deterministic_policy: bool = False,
+        policy: AnyPolicy,
+        venv: VecEnv,
+        deterministic_policy: bool = False,
 ) -> PolicyCallable:
     """Converts any policy-like object into a function from observations to actions."""
     get_actions: PolicyCallable
     if policy is None:
 
         def get_actions(
-            observations: Union[np.ndarray, Dict[str, np.ndarray]],
-            states: Optional[Tuple[np.ndarray, ...]],
-            episode_starts: Optional[np.ndarray],
+                observations: Union[np.ndarray, Dict[str, np.ndarray]],
+                states: Optional[Tuple[np.ndarray, ...]],
+                episode_starts: Optional[np.ndarray],
         ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
             acts = [venv.action_space.sample() for _ in range(len(observations))]
             return np.stack(acts, axis=0), None
@@ -311,9 +311,9 @@ def policy_to_callable(
         # (which would call .forward()). So this elif clause must come first!
 
         def get_actions(
-            observations: Union[np.ndarray, Dict[str, np.ndarray]],
-            states: Optional[Tuple[np.ndarray, ...]],
-            episode_starts: Optional[np.ndarray],
+                observations: Union[np.ndarray, Dict[str, np.ndarray]],
+                states: Optional[Tuple[np.ndarray, ...]],
+                episode_starts: Optional[np.ndarray],
         ) -> Tuple[np.ndarray, Optional[Tuple[np.ndarray, ...]]]:
             assert isinstance(policy, (BaseAlgorithm, BasePolicy))
             # pytype doesn't seem to understand that policy is a BaseAlgorithm
@@ -382,13 +382,14 @@ def policy_to_callable(
 
 
 def generate_trajectories_multi_robot(
-    policy: AnyPolicy,
-    venv: VecEnv,
-    sample_until: GenTrajTerminationFn,
-    rng: np.random.Generator,
-    num_robots: int,
-    *,
-    deterministic_policy: bool = False,
+        policy: AnyPolicy,
+        venv: VecEnv,
+        sample_until: GenTrajTerminationFn,
+        rng: np.random.Generator,
+        num_robots: int,
+        *,
+        deterministic_policy: bool = False,
+        **ablation_kwargs
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate trajectory dictionaries from a policy and an environment.
 
@@ -427,12 +428,12 @@ def generate_trajectories_multi_robot(
     # todo maybe wrap
     cable_lengths = [0.5] * num_robots
     obs_per_robot = np.array([
-        [get_obs_single_robot(num_robots, n, cable_lengths, env_obs) for n in range(num_robots)]
+        [get_obs_single_robot(num_robots, n, cable_lengths, env_obs, **ablation_kwargs) for n in range(num_robots)]
         for env_obs in obs
     ])
 
     # we use dictobs to iterate over the envs in a vecenv
-    #todo: check multi venv
+    # todo: check multi venv
     for env_idx, env_ob in enumerate(obs_per_robot):
         for n in range(num_robots):
             # Seed with first obs only. Inside loop, we'll only add second obs from
@@ -457,13 +458,13 @@ def generate_trajectories_multi_robot(
 
         if isinstance(policy, ActorCriticPolicy):
             obs_per_robot = np.array([
-                [get_obs_single_robot(num_robots, n, cable_lengths, env_obs) for n in range(num_robots)]
+                [get_obs_single_robot(num_robots, n, cable_lengths, env_obs, **ablation_kwargs) for n in range(num_robots)]
                 for env_obs in obs
             ])
             acts = []
             for n in range(num_robots):
                 # todo: check multi venv
-                act_n, state = get_actions(obs_per_robot[:,n], None, dones)
+                act_n, state = get_actions(obs_per_robot[:, n], None, dones)
                 acts.append(act_n)
             acts = np.concatenate(acts, axis=1)
         else:
@@ -471,7 +472,7 @@ def generate_trajectories_multi_robot(
         obs, rews, dones, infos = venv.step(acts)
 
         obs_per_robot = np.array([
-            [get_obs_single_robot(num_robots, n, cable_lengths, env_obs) for n in range(num_robots)]
+            [get_obs_single_robot(num_robots, n, cable_lengths, env_obs, **ablation_kwargs) for n in range(num_robots)]
             for env_obs in obs
         ])
 
@@ -483,7 +484,8 @@ def generate_trajectories_multi_robot(
             for n in range(num_robots):
                 for env in done_envs:
                     terminal_obs = infos_robots[n][env]["terminal_observation"]
-                    infos_robots[n][env]["terminal_observation"] = get_obs_single_robot(num_robots, n, cable_lengths, terminal_obs)
+                    infos_robots[n][env]["terminal_observation"] = get_obs_single_robot(num_robots, n, cable_lengths,
+                                                                                        terminal_obs, **ablation_kwargs)
 
         # If an environment is inactive, i.e. the episode completed for that
         # environment after `sample_until(trajectories)` was true, then we do
@@ -491,19 +493,17 @@ def generate_trajectories_multi_robot(
         # by just making it never done.
         dones &= active
 
-
         for n in range(num_robots):
             new_trajs = trajectories_accum_list[n].add_steps_and_auto_finish(
                 acts[:, n * 4:n * 4 + 4],
-                obs_per_robot[:,n],
+                obs_per_robot[:, n],
                 rews,
                 dones,
                 infos_robots[n]
             )
             traj_list[n].extend(new_trajs)
 
-
-        #todo check for different traj lenghts
+        # todo check for different traj lenghts
         if sample_until(traj_list[0]):
             # Termination condition has been reached. Mark as inactive any
             # environments where a trajectory was completed this timestep.
@@ -550,7 +550,7 @@ def generate_trajectories_multi_robot(
 
 
 def rollout_stats(
-    trajectories: Sequence[types.TrajectoryWithRew],
+        trajectories: Sequence[types.TrajectoryWithRew],
 ) -> Mapping[str, float]:
     """Calculates various stats for a sequence of trajectories.
 
@@ -604,7 +604,7 @@ def rollout_stats(
 
 
 def flatten_trajectories(
-    trajectories: Iterable[types.Trajectory],
+        trajectories: Iterable[types.Trajectory],
 ) -> types.Transitions:
     """Flatten a series of trajectory dictionaries into arrays.
 
@@ -654,7 +654,7 @@ def flatten_trajectories(
 
 
 def flatten_trajectories_with_rew(
-    trajectories: Sequence[types.TrajectoryWithRew],
+        trajectories: Sequence[types.TrajectoryWithRew],
 ) -> types.TransitionsWithRew:
     transitions = flatten_trajectories(trajectories)
     rews = np.concatenate([traj.rews for traj in trajectories])
@@ -665,13 +665,13 @@ def flatten_trajectories_with_rew(
 
 
 def generate_transitions(
-    policy: AnyPolicy,
-    venv: VecEnv,
-    n_timesteps: int,
-    rng: np.random.Generator,
-    *,
-    truncate: bool = True,
-    **kwargs: Any,
+        policy: AnyPolicy,
+        venv: VecEnv,
+        n_timesteps: int,
+        rng: np.random.Generator,
+        *,
+        truncate: bool = True,
+        **kwargs: Any,
 ) -> types.TransitionsWithRew:
     """Generate obs-action-next_obs-reward tuples.
 
@@ -709,15 +709,15 @@ def generate_transitions(
 
 
 def rollout(
-    policy: AnyPolicy,
-    venv: VecEnv,
-    sample_until: GenTrajTerminationFn,
-    rng: np.random.Generator,
-    *,
-    unwrap: bool = True,
-    exclude_infos: bool = True,
-    verbose: bool = True,
-    **kwargs: Any,
+        policy: AnyPolicy,
+        venv: VecEnv,
+        sample_until: GenTrajTerminationFn,
+        rng: np.random.Generator,
+        *,
+        unwrap: bool = True,
+        exclude_infos: bool = True,
+        verbose: bool = True,
+        **kwargs: Any,
 ) -> Sequence[types.TrajectoryWithRew]:
     """Generate policy rollouts.
 
@@ -799,7 +799,8 @@ def discounted_sum(arr: np.ndarray, gamma: float) -> Union[np.ndarray, float]:
     else:
         return np.polynomial.polynomial.polyval(gamma, arr)
 
-def get_obs_single_robot(num_robots, robot, cable_lengths, obs):
+
+def get_obs_single_robot(num_robots, robot, cable_lengths, obs, **ablation_kwargs):
     """ choose the observation input for the decentralized policy
     The input observation is an array (state[t], state_desired[t], payload_acc_desired[t], current_desired_action)
 
@@ -849,22 +850,67 @@ def get_obs_single_robot(num_robots, robot, cable_lengths, obs):
         # positon = state[0:3] - cable_lengths[robot] * cq
         other_cable_q.append(cq)
         rr = state[robot_start_idx + 7 * n:robot_start_idx + 7 * n + 4]
-        other_robot_rot.append(robot_rot)
+        other_robot_rot.append(rr)
 
     action_d_single_robot = action_d[4 * robot:4 * robot + 4]
-    single_robot_obs = np.concatenate((
-        payload_pos_e, payload_vel_e,
-        cable_q, cable_q_d, cable_w, cable_w_d,
-        robot_rot, robot_rot_d, robot_w, robot_w_d,
-        np.ravel(other_cable_q), np.ravel(other_robot_rot),
-        action_d_single_robot
-    ))
+    if not ablation_kwargs:
+        return np.concatenate((
+            payload_pos_e, payload_vel_e,
+            cable_q, cable_q_d, cable_w, cable_w_d,
+            robot_rot, robot_rot_d, robot_w, robot_w_d,
+            np.ravel(other_cable_q), np.ravel(other_robot_rot),
+            action_d_single_robot
+        ))
+    else:
+        single_robot_obs = [payload_pos_e, payload_vel_e]
+        if ablation_kwargs.get("cable_q", False):
+            single_robot_obs.append(cable_q)
+        if ablation_kwargs.get("cable_q_d", False):
+            single_robot_obs.append(cable_q_d)
+        if ablation_kwargs.get("cable_w", False):
+            single_robot_obs.append(cable_w)
+        if ablation_kwargs.get("cable_w_d", False):
+            single_robot_obs.append(cable_w_d)
+        if ablation_kwargs.get("robot_rot", False):
+            single_robot_obs.append(robot_rot)
+        if ablation_kwargs.get("robot_rot_d", False):
+            single_robot_obs.append(robot_rot_d)
+        if ablation_kwargs.get("robot_w", False):
+            single_robot_obs.append(robot_w)
+        if ablation_kwargs.get("robot_w_d", False):
+            single_robot_obs.append(robot_w_d)
+        if ablation_kwargs.get("other_cable_q", False):
+            single_robot_obs.append(np.ravel(other_cable_q))
+        if ablation_kwargs.get("other_robot_rot", False):
+            single_robot_obs.append(np.ravel(other_robot_rot))
 
-    assert len(single_robot_obs) == 6 + 12 + 14 + 7 * (num_robots-1) + 4
-    return single_robot_obs
+        return np.concatenate(single_robot_obs)
 
-def get_len_obs_single_robot(num_robots):
 
-    len_single_robot_obs = 6 + 12 + 14 + 7 * (num_robots-1) + 4
+def get_len_obs_single_robot(num_robots, **ablation_kwargs):
+    if not ablation_kwargs:
 
+        len_single_robot_obs = 6 + 12 + 14 + 7 * (num_robots - 1) + 4
+    else:
+        len_single_robot_obs = 6
+        if ablation_kwargs.get("cable_q", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("cable_q_d", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("cable_w", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("cable_w_d", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("robot_rot", False):
+            len_single_robot_obs += 4
+        if ablation_kwargs.get("robot_rot_d", False):
+            len_single_robot_obs += 4
+        if ablation_kwargs.get("robot_w", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("robot_w_d", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("other_cable_q", False):
+            len_single_robot_obs += 3 * (num_robots - 1)
+        if ablation_kwargs.get("other_robot_rot", False):
+            len_single_robot_obs += 4 * (num_robots - 1)
     return len_single_robot_obs
