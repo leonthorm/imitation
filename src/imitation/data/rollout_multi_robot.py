@@ -883,6 +883,7 @@ def get_obs_single_robot(num_robots, robot, cable_lengths, obs, **ablation_kwarg
             single_robot_obs.append(np.ravel(other_cable_q))
         if ablation_kwargs.get("other_robot_rot", False):
             single_robot_obs.append(np.ravel(other_robot_rot))
+        single_robot_obs.append(action_d_single_robot)
 
         return np.concatenate(single_robot_obs)
 
@@ -892,7 +893,7 @@ def get_len_obs_single_robot(num_robots, **ablation_kwargs):
 
         len_single_robot_obs = 6 + 12 + 14 + 7 * (num_robots - 1) + 4
     else:
-        len_single_robot_obs = 6
+        len_single_robot_obs = 6 + 4
         if ablation_kwargs.get("cable_q", False):
             len_single_robot_obs += 3
         if ablation_kwargs.get("cable_q_d", False):
