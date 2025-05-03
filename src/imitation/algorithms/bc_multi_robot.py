@@ -46,10 +46,10 @@ class BatchIteratorWithEpochEndCallback:
 
     def __post_init__(self) -> None:
         epochs_and_batches_specified = (
-            self.n_epochs is not None and self.n_batches is not None
+                self.n_epochs is not None and self.n_batches is not None
         )
         neither_epochs_nor_batches_specified = (
-            self.n_epochs is None and self.n_batches is None
+                self.n_epochs is None and self.n_batches is None
         )
         if epochs_and_batches_specified or neither_epochs_nor_batches_specified:
             raise ValueError(
@@ -98,15 +98,15 @@ class BehaviorCloningLossCalculator:
     l2_weight: float
 
     def __call__(
-        self,
-        policy: policies.ActorCriticPolicy,
-        obs: Union[
-            types.AnyTensor,
-            types.DictObs,
-            Dict[str, np.ndarray],
-            Dict[str, th.Tensor],
-        ],
-        acts: Union[th.Tensor, np.ndarray],
+            self,
+            policy: policies.ActorCriticPolicy,
+            obs: Union[
+                types.AnyTensor,
+                types.DictObs,
+                Dict[str, np.ndarray],
+                Dict[str, th.Tensor],
+            ],
+            acts: Union[th.Tensor, np.ndarray],
     ) -> BCTrainingMetrics:
         """Calculate the supervised learning loss used to train the behavioral clone.
 
@@ -157,7 +157,7 @@ class BehaviorCloningLossCalculator:
 
 
 def enumerate_batches(
-    batch_it: Iterable[types.TransitionMapping],
+        batch_it: Iterable[types.TransitionMapping],
 ) -> Iterable[Tuple[Tuple[int, int, int], types.TransitionMapping]]:
     """Prepends batch stats before the batches of a batch iterator."""
     num_samples_so_far = 0
@@ -168,7 +168,7 @@ def enumerate_batches(
 
 
 @dataclasses.dataclass(frozen=True)
-class RolloutStatsComputer:
+class RolloutStatsComputerMultiRobot:
     """Computes statistics about rollouts.
 
     Args:
@@ -185,10 +185,11 @@ class RolloutStatsComputer:
     #   https://stable-baselines3.readthedocs.io/en/master/guide/callbacks.html#evalcallback
 
     def __call__(
-        self,
-        policy: policies.ActorCriticPolicy,
-        rng: np.random.Generator,
-        num_robots: int
+            self,
+            policy: policies.ActorCriticPolicy,
+            rng: np.random.Generator,
+            num_robots: int,
+            **ablation_kwargs,
     ) -> Mapping[str, float]:
         if self.venv is not None and self.n_episodes > 0:
             trajs = rollout_multi_robot.generate_trajectories_multi_robot(
@@ -197,6 +198,7 @@ class RolloutStatsComputer:
                 rollout_multi_robot.make_min_episodes(self.n_episodes),
                 rng=rng,
                 num_robots=num_robots,
+                **ablation_kwargs,
             )
             return rollout_multi_robot.rollout_stats(trajs)
         else:
@@ -223,12 +225,12 @@ class BCLogger:
         self._current_epoch = epoch_number
 
     def log_batch(
-        self,
-        batch_num: int,
-        batch_size: int,
-        num_samples_so_far: int,
-        training_metrics: BCTrainingMetrics,
-        rollout_stats: Mapping[str, float],
+            self,
+            batch_num: int,
+            batch_size: int,
+            num_samples_so_far: int,
+            training_metrics: BCTrainingMetrics,
+            rollout_stats: Mapping[str, float],
     ):
         self._logger.record("batch_size", batch_size)
         self._logger.record("bc/epoch", self._current_epoch)
@@ -250,8 +252,8 @@ class BCLogger:
 
 
 def reconstruct_policy(
-    policy_path: str,
-    device: Union[th.device, str] = "auto",
+        policy_path: str,
+        device: Union[th.device, str] = "auto",
 ) -> policies.ActorCriticPolicy:
     """Reconstruct a saved policy.
 
@@ -290,6 +292,7 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
         l2_weight: float = 0.0,
         device: Union[str, th.device] = "auto",
         custom_logger: Optional[imit_logger.HierarchicalLogger] = None,
+        **ablation_kwargs,
     ):
         """Builds BC.
 
@@ -371,6 +374,9 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
 
         self.loss_calculator = BehaviorCloningLossCalculator(ent_weight, l2_weight)
         self.num_robots = num_robots
+        self.ablation_kwargs = dict(ablation_kwargs) if ablation_kwargs else {}
+
+
     @property
     def policy(self) -> policies.ActorCriticPolicy:
         return self._policy
@@ -382,17 +388,17 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
         )
 
     def train(
-        self,
-        *,
-        n_epochs: Optional[int] = None,
-        n_batches: Optional[int] = None,
-        on_epoch_end: Optional[Callable[[], None]] = None,
-        on_batch_end: Optional[Callable[[], None]] = None,
-        log_interval: int = 500,
-        log_rollouts_venv: Optional[vec_env.VecEnv] = None,
-        log_rollouts_n_episodes: int = 5,
-        progress_bar: bool = True,
-        reset_tensorboard: bool = False,
+            self,
+            *,
+            n_epochs: Optional[int] = None,
+            n_batches: Optional[int] = None,
+            on_epoch_end: Optional[Callable[[], None]] = None,
+            on_batch_end: Optional[Callable[[], None]] = None,
+            log_interval: int = 500,
+            log_rollouts_venv: Optional[vec_env.VecEnv] = None,
+            log_rollouts_n_episodes: int = 5,
+            progress_bar: bool = True,
+            reset_tensorboard: bool = False,
     ):
         """Train with supervised learning for some number of epochs.
 
@@ -427,7 +433,7 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
             self._bc_logger.reset_tensorboard_steps()
         self._bc_logger.log_epoch(0)
 
-        compute_rollout_stats = RolloutStatsComputer(
+        compute_rollout_stats = RolloutStatsComputerMultiRobot(
             log_rollouts_venv,
             log_rollouts_n_episodes,
         )
@@ -469,7 +475,7 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
             self.optimizer.zero_grad()
 
             if batch_num % log_interval == 0:
-                rollout_stats = compute_rollout_stats(self.policy, self.rng, self.num_robots)
+                rollout_stats = compute_rollout_stats(self.policy, self.rng, self.num_robots, **self.ablation_kwargs)
 
                 self._bc_logger.log_batch(
                     batch_num,
@@ -484,9 +490,9 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
 
         self.optimizer.zero_grad()
         for (
-            batch_num,
-            minibatch_size,
-            num_samples_so_far,
+                batch_num,
+                minibatch_size,
+                num_samples_so_far,
         ), batch in batches_with_stats:
             obs_tensor: Union[th.Tensor, Dict[str, th.Tensor]]
             # unwraps the observation if it's a dictobs and converts arrays to tensors
@@ -527,4 +533,3 @@ class BCMultiRobot(algo_base.DemonstrationAlgorithm):
         variance = th.exp(2 * log_std)
         mean = variance.mean()
         return variance.mean().item()
-

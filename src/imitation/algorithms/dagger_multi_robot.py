@@ -177,6 +177,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             num_robots: int,
             actions_size_single_robot: int,
             cable_lengths: np.ndarray,
+            **ablation_kwargs
     ) -> None:
         """Builds InteractiveTrajectoryCollector.
 
@@ -207,6 +208,8 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self.num_robots = num_robots
         self.actions_size_single_robot = actions_size_single_robot
         self.cable_lengths = cable_lengths
+
+        self.ablation_kwargs = dict(ablation_kwargs) if ablation_kwargs else {}
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
         """Set the seed for the DAgger random number generator and wrapped VecEnv.
@@ -274,7 +277,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
             # acts_conc = np.concatenate((acts_conc, acts_nth_robot), axis=1)
             #
             obs_per_robot = np.array([
-                [get_obs_single_robot(self.num_robots, n, self.cable_lengths, env_obs) for n in range(self.num_robots)]
+                [get_obs_single_robot(self.num_robots, n, self.cable_lengths, env_obs,  **self.ablation_kwargs) for n in range(self.num_robots)]
                 for env_obs in self._last_obs
             ])
             acts_list = [self.get_robot_acts(obs_per_robot[mask, n]) for n in range(self.num_robots)]
@@ -306,7 +309,7 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         # todo: split reward
         for traj_index, traj in enumerate(fresh_demos):
             for n in range(self.num_robots):
-                obs_nth_robot = np.array([get_obs_single_robot(self.num_robots, n, self.cable_lengths, obs) for obs in traj.obs])
+                obs_nth_robot = np.array([get_obs_single_robot(self.num_robots, n, self.cable_lengths, obs, **self.ablation_kwargs) for obs in traj.obs])
                 acts_nth_robot = traj.acts[:,n * self.actions_size_single_robot:(n + 1) * self.actions_size_single_robot
                                  ]
                 # todo: reward and info per robot
@@ -830,6 +833,7 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
                                                 actions_size_single_robot: int,
                                                 num_robots: int,
                                                 cable_lengths: np.ndarray,
+                                                **ablation_kwargs,
                                                 ) -> InteractiveTrajectoryCollectorMultiRobot:
         """Create trajectory collector to extend current round's demonstration set.
 
@@ -848,7 +852,8 @@ class DAggerTrainerMultiRobot(base.BaseImitationAlgorithm):
             rng=self.rng,
             num_robots=num_robots,
             actions_size_single_robot=actions_size_single_robot,
-            cable_lengths=cable_lengths
+            cable_lengths=cable_lengths,
+            **ablation_kwargs,
         )
         return collector
 
