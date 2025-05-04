@@ -28,6 +28,8 @@ from stable_baselines3.common.vec_env import VecEnv
 
 from imitation.data import types, rollout
 
+from src.thrifty.algos.core import Ensemble
+
 
 def unwrap_traj(traj: types.TrajectoryWithRew) -> types.TrajectoryWithRew:
     """Uses `RolloutInfoWrapper`-captured `obs` and `rews` to replace fields.
@@ -456,7 +458,7 @@ def generate_trajectories_multi_robot(
     while np.any(active):
         # expert_call
 
-        if isinstance(policy, ActorCriticPolicy):
+        if isinstance(policy, ActorCriticPolicy) or isinstance(policy, Ensemble):
             obs_per_robot = np.array([
                 [get_obs_single_robot(num_robots, n, cable_lengths, env_obs, **ablation_kwargs) for n in range(num_robots)]
                 for env_obs in obs
