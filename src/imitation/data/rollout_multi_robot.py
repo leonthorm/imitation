@@ -4,7 +4,6 @@ import collections
 import dataclasses
 import logging
 from copy import deepcopy
-from itertools import chain
 from typing import (
     Any,
     Callable,
@@ -21,12 +20,11 @@ from typing import (
 
 import numpy as np
 from gymnasium import spaces
+from imitation.data import types
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ActorCriticPolicy
 from stable_baselines3.common.utils import check_for_correct_spaces
 from stable_baselines3.common.vec_env import VecEnv
-
-from imitation.data import types, rollout
 
 from src.thrifty.algos.core import Ensemble
 
@@ -457,7 +455,6 @@ def generate_trajectories_multi_robot(
     dones = np.zeros(venv.num_envs, dtype=bool)
     while np.any(active):
         # expert_call
-
         if isinstance(policy, ActorCriticPolicy) or isinstance(policy, Ensemble):
             obs_per_robot = np.array([
                 [get_obs_single_robot(num_robots, n, cable_lengths, env_obs, **ablation_kwargs) for n in range(num_robots)]
