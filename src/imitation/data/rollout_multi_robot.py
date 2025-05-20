@@ -861,7 +861,11 @@ def get_obs_single_robot(num_robots, robot, cable_lengths, obs, **ablation_kwarg
             action_d_single_robot
         ))
     else:
-        single_robot_obs = [payload_pos_e, payload_vel_e]
+        single_robot_obs = []
+        if ablation_kwargs.get("payload_pos_e", False):
+            single_robot_obs.append(payload_pos_e)
+        if ablation_kwargs.get("payload_vel_e", False):
+            single_robot_obs.append(payload_vel_e)
         if ablation_kwargs.get("cable_q", False):
             single_robot_obs.append(cable_q)
         if ablation_kwargs.get("cable_q_d", False):
@@ -882,7 +886,8 @@ def get_obs_single_robot(num_robots, robot, cable_lengths, obs, **ablation_kwarg
             single_robot_obs.append(np.ravel(other_cable_q))
         if ablation_kwargs.get("other_robot_rot", False):
             single_robot_obs.append(np.ravel(other_robot_rot))
-        single_robot_obs.append(action_d_single_robot)
+        if ablation_kwargs.get("action_d_single_robot", False):
+            single_robot_obs.append(action_d_single_robot)
 
         return np.concatenate(single_robot_obs)
 
@@ -892,7 +897,11 @@ def get_len_obs_single_robot(num_robots, **ablation_kwargs):
 
         len_single_robot_obs = 6 + 12 + 14 + 7 * (num_robots - 1) + 4
     else:
-        len_single_robot_obs = 6 + 4
+        len_single_robot_obs = 0
+        if ablation_kwargs.get("payload_pos_e", False):
+            len_single_robot_obs += 3
+        if ablation_kwargs.get("payload_vel_e", False):
+            len_single_robot_obs += 3
         if ablation_kwargs.get("cable_q", False):
             len_single_robot_obs += 3
         if ablation_kwargs.get("cable_q_d", False):
@@ -913,4 +922,6 @@ def get_len_obs_single_robot(num_robots, **ablation_kwargs):
             len_single_robot_obs += 3 * (num_robots - 1)
         if ablation_kwargs.get("other_robot_rot", False):
             len_single_robot_obs += 4 * (num_robots - 1)
+        if ablation_kwargs.get("action_d_single_robot", False):
+            len_single_robot_obs += 4
     return len_single_robot_obs
