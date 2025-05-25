@@ -209,6 +209,9 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         self.actions_size_single_robot = actions_size_single_robot
         self.cable_lengths = cable_lengths
 
+        self.expert_queries = 0
+        self.policy_queries = 0
+
         self.ablation_kwargs = dict(ablation_kwargs) if ablation_kwargs else {}
 
     def seed(self, seed: Optional[int] = None) -> List[Optional[int]]:
@@ -269,6 +272,8 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         actual_acts = np.array(actions)
 
         mask = self.rng.uniform(0, 1, size=(self.num_envs,)) > self.beta
+        self.policy_queries += np.sum(mask)
+        self.expert_queries += len(mask) - np.sum(mask)
         if np.sum(mask) != 0:
             # todo: check if this makes sense for multiple venv
             # acts_conc = np.array()
