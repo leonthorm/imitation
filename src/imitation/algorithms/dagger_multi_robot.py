@@ -272,8 +272,8 @@ class InteractiveTrajectoryCollectorMultiRobot(vec_env.VecEnvWrapper):
         actual_acts = np.array(actions)
 
         mask = self.rng.uniform(0, 1, size=(self.num_envs,)) > self.beta
-        self.policy_queries += np.sum(mask)
-        self.expert_queries += len(mask) - np.sum(mask)
+        self.policy_queries += (np.sum(mask) * self.num_robots)
+        self.expert_queries += (len(mask) - np.sum(mask)) * self.num_robots
         if np.sum(mask) != 0:
             # todo: check if this makes sense for multiple venv
             # acts_conc = np.array()
